@@ -1,0 +1,7 @@
+1735111303051	Delete resource 'gpio_inout'
+1735111758576	Delete resource 'lvd_detect_falling_irq'
+1735111762235	Delete resource 'adc_scan_irq_sw'
+1735111766775	Delete resource 'adc_tim2_scan_irq_sw'
+1735111770522	Delete resource 'clk_systick'
+1735111775375	Delete resource 'crc'
+1735111782033	Delete resource 'lpuart_nomal'

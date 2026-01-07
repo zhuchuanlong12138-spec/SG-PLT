@@ -1,0 +1,61 @@
+# ===== Keil MDK / uVision build output =====
+Objects/
+Listings/
+RTE/_Target_*/
+*.axf
+*.elf
+*.map
+*.hex
+*.bin
+*.lst
+*.o
+*.d
+*.crf
+*.i
+*.lnp
+*.m66
+*.out
+*.sct
+*.dep
+*.uvguix.*
+*.uvgui.*
+*.uvoptx
+*.uvopt
+*.uvprojx.bak
+*.uvproj.bak
+*.bak
+
+# ===== Keil user/session specific =====
+*.uvmpw
+*.uvws
+*.uvuser
+*.uvuseros
+*.uvguix
+*.uvoptx
+*.uvopt
+
+# ===== ARM Compiler / MDK temp =====
+*.obj
+*.pch
+*.idb
+*.pdb
+*.ilk
+
+# ===== CMSIS / Pack / RTE =====
+*.pack
+*.pdsc
+*.idx
+*.url
+RTE/
+
+# ===== OS / IDE =====
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+*.log
+
+
+
+Output/
