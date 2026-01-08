@@ -426,19 +426,19 @@
               <FilePath>..\source\dl2807\dl2807_mac.c</FilePath>
             </File>
             <File>
+              <FileName>dbg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\source\dbg.c</FilePath>
+            </File>
+            <File>
               <FileName>APP_COORD_main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\APP_COORD_main.c</FilePath>
+              <FilePath>..\source\APP_COORD_main.c</FilePath>
             </File>
             <File>
               <FileName>APP_NODE_main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\APP_NODE_main.c</FilePath>
-            </File>
-            <File>
-              <FileName>dbg.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\source\dbg.c</FilePath>
+              <FilePath>..\source\APP_NODE_main.c</FilePath>
             </File>
           </Files>
         </Group>

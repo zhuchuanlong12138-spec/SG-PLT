@@ -1,0 +1,2793 @@
+/*******************************************************************************
+ * @note Copyright (C) 2023 Shanghai Panchip Microelectronics Co., Ltd. All rights reserved.
+ *
+ * @file pan_rf.c
+ * @brief
+ *
+ * @history - V0.8, 2024-4
+*******************************************************************************/
+#include "pan3029_port.h"
+#include "pan3029_param.h"
+#include "radio.h"
+#include <math.h>
+#include "ddl.h"
+#include "clk.h"
+#include "gpio.h"
+#include "uart.h"
+#include "bt.h"
+#include "delay.h"
+#include <stdio.h>
+
+#define USE_MODEM_CHIRPlOT
+//#define USE_MODEM_LORA
+
+/* debug helpers implemented in main.c */
+extern void dbg_puts(const char *s);
+extern void dbg_put_hex8(uint8_t v);
+extern void dbg_put_hex16(uint16_t v);
+extern void dbg_put_u32(uint32_t v);
+extern void dbg_send_byte(uint8_t b);
+
+/* 
+ * flag that indicate if a new packet is received.
+*/
+static int packet_received = RADIO_FLAG_IDLE;
+
+/*
+ * flag that indicate if transmision is finished.
+*/
+static int packet_transmit = RADIO_FLAG_IDLE;
+
+/* --- rw mask auto-detect (C90 compatible) --- */
+static uint8_t g_pan3029_rw_read_mask = 0x80;
+static uint8_t g_pan3029_rw_inited = 0;
+
+static uint8_t spi_xfer(uint8_t v)
+{
+    return rf_port.spi_readwrite(v);
+}
+
+static uint8_t pan3029_read_raw(uint8_t addr_with_mask)
+{
+    uint8_t val;
+
+    rf_port.spi_cs_low();
+    spi_xfer(addr_with_mask);
+    val = spi_xfer(0x00);
+    rf_port.spi_cs_high();
+
+    return val;
+}
+
+static void pan3029_write_raw(uint8_t addr_with_mask, uint8_t value)
+{
+    rf_port.spi_cs_low();
+    spi_xfer(addr_with_mask);
+    spi_xfer(value);
+    rf_port.spi_cs_high();
+}
+
+static void pan3029_detect_rw_mask(void)
+{
+    uint8_t r04_a, r04_b;
+
+    r04_a = pan3029_read_raw((uint8_t)(0x04 | 0x80)); /* read via |0x80 */
+    r04_b = pan3029_read_raw((uint8_t)(0x04 & 0x7F)); /* read via &0x7F */
+
+    /* 你目前读到的 REG04 稳定是 0x06，用它强判 */
+    if ((r04_a == 0x06) && (r04_b != 0x06))
+        g_pan3029_rw_read_mask = 0x80;
+    else if ((r04_b == 0x06) && (r04_a != 0x06))
+        g_pan3029_rw_read_mask = 0x00;
+    else
+        g_pan3029_rw_read_mask = 0x80; /* fallback */
+
+    g_pan3029_rw_inited = 1;
+}
+
+
+struct RxDoneMsg RxDoneParams;
+
+/**
+ * @brief get receive flag
+ * @param[in] <none>
+ * @return receive state
+ */
+int rf_get_recv_flag(void)
+{
+    return packet_received;
+}
+
+/**
+ * @brief set receive flag
+ * @param[in] <status> receive flag state to set
+ * @return none
+ */
+void rf_set_recv_flag(int status)
+{
+    packet_received = status;
+}
+
+/**
+ * @brief get transmit flag
+ * @param[in] <none>
+ * @return reansmit state
+ */
+int rf_get_transmit_flag(void)
+{
+    return packet_transmit;
+}
+/**
+ * @brief set transmit flag
+ * @param[in] <status> transmit flag state to set
+ * @return none
+ */
+void rf_set_transmit_flag(int status)
+{
+    packet_transmit = status;
+}
+
+/**
+ * @brief count trailing zeros
+ *
+ * @param val
+ * @return int
+ */
+static uint8_t __ctz(uint8_t val)
+{
+    int i;
+
+    for (i = 0; i < 8; ++i)
+    {
+        if ((val >> i) & 1)
+            return (uint8_t)i;
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief read one byte from register in current page
+ * @param[in] <addr> register address to write
+ * @return value read from register
+ */
+//uint8_t rf_read_reg(uint8_t addr)
+//{
+//    uint8_t temreg;
+
+//    rf_port.spi_cs_low();
+//    rf_port.spi_readwrite(0x00 | (addr << 1));
+//    temreg = rf_port.spi_readwrite(0x00);
+//    rf_port.spi_cs_high();
+
+//    return temreg;
+//}
+uint8_t rf_read_reg(uint8_t addr)
+{
+    if (!g_pan3029_rw_inited)
+        pan3029_detect_rw_mask();
+
+    return pan3029_read_raw((uint8_t)(addr | g_pan3029_rw_read_mask));
+}
+
+/**
+ * @brief write global register in current page and chick
+ * @param[in] <addr> register address to write
+ * @param[in] <value> address value to write to rgister
+ * @return result
+ */
+//uint8_t rf_write_reg(uint8_t addr, uint8_t value)
+//{
+//    uint8_t addr_w = (0x01 | (addr << 1));
+
+//    rf_port.spi_cs_low();
+//    rf_port.spi_readwrite(addr_w);
+//    rf_port.spi_readwrite(value);
+//    rf_port.spi_cs_high();
+//    
+//#if SPI_WRITE_CHECK
+//    if (rf_read_reg(addr) != value)
+//    {
+//        return FAIL;
+//    }
+//#endif
+//    
+//    return OK;
+//}
+uint8_t rf_write_reg(uint8_t addr, uint8_t value)
+{
+    if (!g_pan3029_rw_inited)
+        pan3029_detect_rw_mask();
+
+    /* 写地址和读地址通常是相反语义：读用|0x80，则写用&0x7F；反之亦然 */
+    if (g_pan3029_rw_read_mask == 0x80)
+        pan3029_write_raw((uint8_t)(addr & 0x7F), value);
+    else
+        pan3029_write_raw((uint8_t)(addr | 0x80), value);
+
+    return 0;
+}
+
+/**
+ * @brief rf send data fifo,send bytes register
+ * @param[in] <addr> register address to write
+ * @param[in] <buffer> send data buffer
+ * @param[in] <size> send data size
+ * @return none
+ */
+void rf_write_fifo(uint8_t addr, uint8_t *buffer, int size)
+{
+    int i;
+    uint8_t addr_w = (0x01 | (addr << 1));
+
+    rf_port.spi_cs_low();
+    rf_port.spi_readwrite(addr_w);
+    for (i = 0; i < size; i++)
+    {
+        rf_port.spi_readwrite(buffer[i]);
+    }
+    rf_port.spi_cs_high();
+}
+
+/**
+ * @brief rf receive data fifo,read bytes from register
+ * @param[in] <addr> register address to write
+ * @param[in] <buffer> receive data buffer
+ * @param[in] <size> receive data size
+ * @return none
+ */
+void rf_read_fifo(uint8_t addr, uint8_t *buffer, int size)
+{
+    int i;
+    uint8_t addr_w = (0x00 | (addr << 1));
+
+    rf_port.spi_cs_low();
+    rf_port.spi_readwrite(addr_w);
+    for (i = 0; i < size; i++)
+    {
+        buffer[i] = rf_port.spi_readwrite(0x00);
+    }
+    rf_port.spi_cs_high();
+}
+
+/**
+ * @brief switch page
+ * @param[in] <page> page to switch
+ * @return result
+ */
+RF_Err_t rf_switch_page(enum PAGE_SEL page)
+{
+    uint8_t page_sel;
+    uint8_t tmpreg;
+
+    tmpreg = rf_read_reg(REG_SYS_CTL);
+    page_sel = (tmpreg & 0xFC) | page;
+    rf_write_reg(REG_SYS_CTL, page_sel);
+
+#if SPI_WRITE_CHECK
+    if ((rf_read_reg(REG_SYS_CTL) & 0x03) != page)
+    {
+        return FAIL;
+    }
+#endif
+    
+    return OK;
+}
+
+/**
+ * @brief This function write a value to register in specific page
+ * @param[in] <page> the page of register
+ * @param[in] <addr> register address
+ * @param[in] <value> value to write
+ * @return result
+ */
+RF_Err_t rf_write_spec_page_reg(enum PAGE_SEL page, uint8_t addr, uint8_t value)
+{
+    RF_ASSERT(rf_switch_page(page));
+    RF_ASSERT(rf_write_reg(addr, value));
+
+    return OK;
+}
+
+/**
+ * @brief read a value to register in specific page
+ * @param[in] <page> the page of register
+ * @param[in] <addr> register address
+ * @return success(register value) or failure
+ */
+uint8_t rf_read_spec_page_reg(enum PAGE_SEL page, uint8_t addr)
+{
+    RF_ASSERT(rf_switch_page(page));
+
+    return rf_read_reg(addr);
+}
+
+/**
+ * @brief write continue register valuies(buffer) in specific addr page
+ * @param[in] <page> the page of register
+ * @param[in] <addr> register start address
+ * @param[in] <buffer> values to write
+ * @param[in] <len> buffer len
+ * @return result
+ */
+RF_Err_t rf_write_spec_page_regs(enum PAGE_SEL page, uint8_t addr, uint8_t *buffer, uint8_t len)
+{
+    uint8_t i;
+    uint16_t addr_w;
+    RF_Err_t ret = RF_OK;
+
+    RF_ASSERT(rf_switch_page(page));
+
+    addr_w = (0x01 | (addr << 1));
+    rf_port.spi_cs_low();
+    rf_port.spi_readwrite(addr_w);
+    for (i = 0; i < len; i++)
+    {
+        rf_port.spi_readwrite(buffer[i]);
+    }
+    rf_port.spi_cs_high();
+
+#if SPI_WRITE_CHECK
+    rf_port.spi_cs_low();
+    rf_port.spi_readwrite(0x00 | (addr << 1));
+    for (i = 0; i < len; i++)
+    {
+        if(buffer[i] != rf_port.spi_readwrite(0x00))
+        {
+            ret = FAIL;
+            break;
+        }
+    }
+    rf_port.spi_cs_high();
+#endif
+
+    return ret;
+}
+
+RF_Err_t rf_read_spec_page_regs(enum PAGE_SEL page, uint8_t addr, uint8_t *buffer, uint8_t len)
+{
+    uint8_t i;
+    
+    RF_ASSERT(rf_switch_page(page));
+
+    rf_port.spi_cs_low();
+    rf_port.spi_readwrite(0x00 | (addr << 1));
+    for (i = 0; i < len; i++)
+    {
+        buffer[i] = rf_port.spi_readwrite(0x00);
+    }
+    rf_port.spi_cs_high();
+
+    return OK;
+}
+
+/**
+ * @brief Set bits to 1
+ *
+ * @param page
+ * @param addr
+ * @param bit_mask
+ * @return RF_Err_t
+ */
+RF_Err_t rf_set_spec_page_reg_bits(enum PAGE_SEL page, uint8_t addr, uint8_t mask)
+{
+    uint8_t tmp;
+    RF_Err_t ret;
+
+    tmp = rf_read_spec_page_reg(page, addr);
+    ret = rf_write_spec_page_reg(page, addr, tmp | mask);
+
+    return ret;
+}
+
+/**
+ * @brief Set bits to 0
+ *
+ * @param page
+ * @param addr
+ * @param bit_mask
+ * @return RF_Err_t
+ */
+RF_Err_t rf_reset_spec_page_reg_bits(enum PAGE_SEL page, uint8_t addr, uint8_t mask)
+{
+    uint8_t tmp;
+    RF_Err_t ret;
+    
+    tmp = rf_read_spec_page_reg(page, addr);
+    ret = rf_write_spec_page_reg(page, addr, tmp & (~mask));
+    
+    return ret;
+}
+
+RF_Err_t rf_write_spec_page_reg_bits(enum PAGE_SEL page, uint8_t addr, uint8_t val, uint8_t mask)
+{
+    uint8_t tmp;
+    RF_Err_t ret;
+    uint8_t shift = GET_SHIFT(mask);
+
+    val <<= shift;
+    val &= mask;
+
+    tmp = rf_read_spec_page_reg(page, addr);
+    ret = rf_write_spec_page_reg(page, addr, (tmp & (~mask)) | val);
+
+    return ret;
+}
+
+/**
+ * @brief rf clear all irq
+ * @param[in] <none>
+ * @return result
+ */
+uint8_t rf_clr_irq(uint8_t flags)
+{
+    rf_write_spec_page_reg(PAGE0_SEL, 0x6C, flags); // clr irq
+	
+    return OK;
+}
+
+/**
+ * @brief get irq status
+ * @param[in] <none>
+ * @return ira status
+ */
+uint8_t rf_get_irq(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE0_SEL, 0x6C);
+
+    return (tmpreg & 0x7F);
+}
+
+/**
+ * @brief RF 1.2V register refresh, Will not change register values
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_refresh(void)
+{
+    uint8_t tmpreg;
+
+    tmpreg = rf_read_reg(REG_SYS_CTL);
+    tmpreg |= 0x80;
+    rf_write_reg(REG_SYS_CTL, tmpreg);
+
+    tmpreg = rf_read_reg(REG_SYS_CTL);
+    tmpreg &= 0x7F;
+    rf_write_reg(REG_SYS_CTL, tmpreg);
+
+    rf_read_reg(REG_SYS_CTL);
+
+    return OK;
+}
+
+/**
+ * @brief read packet count register
+ * @param[in] <none>
+ * @return packet count
+ */
+uint16_t rf_read_pkt_cnt(void)
+{
+    uint8_t reg_low, reg_high;
+    uint16_t pkt_cnt;
+
+    reg_low = rf_read_spec_page_reg(PAGE1_SEL, 0x6c);
+    reg_high = rf_read_spec_page_reg(PAGE1_SEL, 0x6d);
+
+    pkt_cnt = (reg_high << 8) | reg_low;
+
+    return pkt_cnt;
+}
+
+/**
+ * @brief clear packet count register
+ * @param[in] <none>
+ * @return none
+ */
+void rf_clr_pkt_cnt(void)
+{
+    uint8_t tmpreg;
+
+    tmpreg = rf_read_reg(REG_SYS_CTL);
+    tmpreg |= 0x40;
+    rf_write_reg(REG_SYS_CTL, tmpreg);
+
+//    tmpreg = rf_read_reg(REG_SYS_CTL);
+    tmpreg = (tmpreg & 0xbf);
+    rf_write_reg(REG_SYS_CTL, tmpreg);
+}
+
+/**
+ * @brief enable AGC function
+ * @param[in] <state>
+ *			  AGC_OFF/AGC_ON
+ * @return result
+ */
+RF_Err_t rf_agc_enable(bool NewState)
+{
+    if(NewState == AGC_OFF)
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE2_SEL, 0x06, BIT0));
+    }
+    else
+    {
+        RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE2_SEL, 0x06, BIT0));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief configure AGC function
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_agc(bool NewState)
+{
+    RF_ASSERT(rf_agc_enable(NewState));
+    // RF_ASSERT(rf_write_spec_page_regs(PAGE2_SEL, 0x0a, (uint8_t *)reg_agc_freq400, 40));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE2_SEL, 0x34, 0xef));
+
+    return OK;
+}
+
+/**
+ * @brief do basic configuration to initialize
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_ft_calibr(void)
+{
+    uint8_t i, tmpreg, cal[0x26] = {0};
+
+    rf_efuse_on();
+
+    for (i = 17; i < 20; i++)
+    {
+        cal[0x0d + i] = rf_efuse_read_encry_byte(0x3b, 0x5aa5, 0x0d + i);
+    }
+
+    if (rf_efuse_read_encry_byte(0x3b, 0x5aa5, 0x1c) == 0x5a)
+    {
+        rf_write_spec_page_reg(PAGE2_SEL, 0x3d, 0xfd);
+        
+        if (cal[0x0d + 19] != 0)
+        {
+            rf_write_spec_page_reg(PAGE0_SEL, 0x45, cal[0x0d + 19]);
+        }
+
+        if (rf_efuse_read_encry_byte(0x3b, 0x5aa5, 0x0d) == MODEM_MPA)
+        {
+            RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x1C, cal[0x1E]&0x1F, 0x1F));
+        }
+        else if (rf_efuse_read_encry_byte(0x3b, 0x5aa5, 0x0d) == MODEM_MPB)
+        {
+            tmpreg = (0xc0 | (cal[0x1e] & 0x1f));
+            rf_write_spec_page_reg(PAGE3_SEL, 0x1c, tmpreg);
+        }
+
+        rf_write_spec_page_reg(PAGE3_SEL, 0x1d, cal[0x1f]);
+    }
+
+    rf_efuse_off();
+
+    return OK;
+}
+
+/**
+ * @brief rf register configuration
+ * @param[in] <none>
+ * @return none
+ */
+RF_Err_t rf_reg_cfg(void)
+{
+    int i;
+
+    for (i = 0; i < (int)(sizeof(g_reg_cfg) / sizeof(pan_reg_cfg_t)); i++)
+    {
+        RF_ASSERT(rf_write_spec_page_reg(g_reg_cfg[i].page, g_reg_cfg[i].addr, g_reg_cfg[i].value));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief change rf mode from deep sleep to standby3(STB3)
+ * @param[in] <none>
+ * @return result
+ */
+//RF_Err_t rf_init(void)
+//{
+//    uint8_t rstreg, porreg;
+//	
+//    porreg = rf_read_reg(0x04);
+//	
+//    porreg |= 0x10;
+//    rf_write_reg(0x04, porreg);
+//    rf_port.delayus(10);
+//    porreg &= 0xEF;
+//    rf_write_reg(0x04, porreg);
+//    rstreg = rf_read_reg(REG_SYS_CTL);
+//    rstreg &= 0x7F;
+//    rf_write_reg(REG_SYS_CTL, rstreg);
+//    rf_port.delayus(10);
+//    rstreg |= 0x80;
+//    rf_write_reg(REG_SYS_CTL, rstreg);
+//    rf_port.delayus(10);
+//    rstreg &= 0x7F;
+//    rf_write_reg(REG_SYS_CTL, rstreg);
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_DEEP_SLEEP));
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_SLEEP));
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE3_SEL, 0x06, BIT5));
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB1));
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x26, 0x2f));
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_write_reg(0x04, 0x36));
+//    rf_port.delayus(10);
+
+//    rf_port.tcxo_init();
+
+//    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB2));
+//    rf_port.delayus(150);
+
+//    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+//    rf_port.delayus(10);
+
+//    RF_ASSERT(rf_ft_calibr());
+//    RF_ASSERT(rf_reg_cfg());
+//    RF_ASSERT(rf_set_agc(AGC_ON));
+
+//    rf_port.antenna_init();
+
+//    return OK;
+//}
+RF_Err_t rf_init(void)
+{
+    uint8_t rstreg, porreg;
+
+    dbg_puts("[RF] rf_init enter\r\n");
+
+    dbg_puts("[RF] 1 read 0x04\r\n");
+    porreg = rf_read_reg(0x04);
+
+    dbg_puts("[RF] 2 toggle 0x04 bit4\r\n");
+    porreg |= 0x10;
+    rf_write_reg(0x04, porreg);
+    rf_port.delayus(10);
+    porreg &= 0xEF;
+    rf_write_reg(0x04, porreg);
+
+    dbg_puts("[RF] 3 reset toggle SYS_CTL\r\n");
+    rstreg = rf_read_reg(REG_SYS_CTL);
+    rstreg &= 0x7F;
+    rf_write_reg(REG_SYS_CTL, rstreg);
+    rf_port.delayus(10);
+    rstreg |= 0x80;
+    rf_write_reg(REG_SYS_CTL, rstreg);
+    rf_port.delayus(10);
+    rstreg &= 0x7F;
+    rf_write_reg(REG_SYS_CTL, rstreg);
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 4 mode DEEP_SLEEP\r\n");
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_DEEP_SLEEP));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 5 mode SLEEP\r\n");
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_SLEEP));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 6 page3 0x06 set BIT5\r\n");
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE3_SEL, 0x06, BIT5));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 7 mode STB1\r\n");
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB1));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 8 page3 0x26=0x2f\r\n");
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x26, 0x2f));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 9 reg 0x04=0x36\r\n");
+    RF_ASSERT(rf_write_reg(0x04, 0x36));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 10 tcxo_init\r\n");
+    rf_port.tcxo_init();
+
+    dbg_puts("[RF] 11 mode STB2\r\n");
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB2));
+    rf_port.delayus(150);
+
+    dbg_puts("[RF] 12 mode STB3\r\n");
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+    rf_port.delayus(10);
+
+    dbg_puts("[RF] 13 ft_calibr enter\r\n");
+    RF_ASSERT(rf_ft_calibr());
+    dbg_puts("[RF] 14 ft_calibr exit\r\n");
+
+    dbg_puts("[RF] 15 reg_cfg enter\r\n");
+    RF_ASSERT(rf_reg_cfg());
+    dbg_puts("[RF] 16 reg_cfg exit\r\n");
+
+    dbg_puts("[RF] 17 agc on\r\n");
+    RF_ASSERT(rf_set_agc(AGC_ON));
+
+    dbg_puts("[RF] 18 antenna_init\r\n");
+    rf_port.antenna_init();
+
+    dbg_puts("[RF] rf_init exit OK\r\n");
+		
+    return OK;
+}
+
+
+/**
+ * @brief change rf mode from sleep to standby3(STB3)
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_sleep_wakeup(void)
+{
+    // RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_SLEEP));
+
+    // rf_port.delayus(10);
+
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE3_SEL, 0x06, BIT5));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB1));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x26, 0x2f));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(0x04, 0x36));
+    rf_port.delayus(10);
+
+    rf_port.tcxo_init();
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB2));
+    rf_port.delayus(150);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+
+    rf_port.delayus(10);
+    rf_port.antenna_init();
+
+    return OK;
+}
+
+/**
+ * @brief change rf mode from standby3(STB3) to deep sleep, rf should set DCDC_OFF before enter deepsleep
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_deepsleep(void)
+{
+	rf_port.antenna_close();
+    rf_port.delayus(10);
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+    rf_port.delayus(150);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB2));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB1));
+    rf_port.delayus(10);
+
+    rf_port.tcxo_close();
+
+    RF_ASSERT(rf_write_reg(0x04, 0x06));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_SLEEP));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE3_SEL, 0x06, BIT5));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x26, 0x0f));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_DEEP_SLEEP));
+
+    return OK;
+}
+
+/**
+ * @brief change rf mode from standby3(STB3) to sleep, rf should set DCDC_OFF before enter sleep
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_sleep(void)
+{
+	rf_port.antenna_close();
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+    rf_port.delayus(150);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB2));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB1));
+
+    rf_port.delayus(10);
+    rf_port.tcxo_close();
+
+    RF_ASSERT(rf_write_reg(0x04, 0x16));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_SLEEP));
+
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE3_SEL, 0x06, BIT5));
+    rf_port.delayus(10);
+
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x26, 0x0f));
+
+    return OK;
+}
+
+/**
+ * @brief set LO frequency
+ * @param[in] <lo> LO frequency
+ *			  LO_400M / LO_800M
+ * @return result
+ */
+RF_Err_t rf_set_lo_freq(uint32_t lo)
+{
+    if(lo == LO_400M)
+    {
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x3D, 1, BIT6|BIT5|BIT4));
+    }
+    else // if(lo == LO_800M)
+    {
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x3D, 0, BIT6|BIT5|BIT4));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief set frequence
+ * @param[in] <freq>  RF frequency(in Hz) to set
+ * @return result
+ */
+RF_Err_t rf_set_freq(uint32_t freq)
+{
+    uint8_t lowband_sel = 0; // 400M 800M is same value?
+    float tmp_var;
+    int integer_part;
+    float fractional_part;
+    int fb, fc;
+    int i;
+    uint8_t temp_fx[3];
+    uint8_t temp_freq[4];
+
+    if(freq < freq_405000000 || freq > freq_1080000000)
+    {
+        return FAIL;
+    }
+
+    if (freq < 800000000)
+    {
+        RF_ASSERT(rf_write_spec_page_regs(PAGE2_SEL, 0x0A, (uint8_t *)reg_agc_freq400, 40));
+    }
+    else
+    {
+        RF_ASSERT(rf_write_spec_page_regs(PAGE2_SEL, 0x0A, (uint8_t *)reg_agc_freq800, 40));
+    }
+
+    for (i = 0; i < 16; i++)
+    {
+        if(freq == freq_405000000 || freq == freq_810000000)
+        {
+            RF_ASSERT(rf_write_spec_page_reg(PAGE0_SEL, 0x40, 0x1A));
+            break;
+        }
+        else if(freq > freq_table[i][0] && freq <= freq_table[i][1])
+        {
+            RF_ASSERT(rf_write_spec_page_reg(PAGE0_SEL, 0x40, freq_param_table[i]));
+            break;
+        }
+    }
+
+    if (freq < 800000000)
+    {
+        tmp_var = freq * 4.0 / 32000000;
+        rf_set_lo_freq(LO_400M);
+    }
+    else
+    {
+        tmp_var = freq * 2.0 / 32000000;
+        rf_set_lo_freq(LO_800M);
+    }
+
+    integer_part = (int)tmp_var; // keep the integer part
+    fractional_part = tmp_var - integer_part; // keep the fractional part
+
+    fb = integer_part - 20;
+    fc = (int)(fractional_part * 1600 / (2 * (1 + lowband_sel)));    temp_fx[0] = (uint8_t)(fb & 0xFF);
+    temp_fx[1] = (uint8_t)(fc & 0xFF);
+    temp_fx[2] = (uint8_t)((fc >> 8) & 0x0F);
+    RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x15, temp_fx, 3));    temp_freq[0] = (uint8_t)(freq & 0xFF);
+    temp_freq[1] = (uint8_t)((freq >> 8) & 0xFF);
+    temp_freq[2] = (uint8_t)((freq >> 16) & 0xFF);
+    temp_freq[3] = (uint8_t)((freq >> 24) & 0xFF);
+    RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x09, temp_freq, 4));
+    return OK;
+}
+
+/**
+ * @brief read frequency(in Hz)
+ * @param[in] <none>
+ * @return frequency(in Hz)
+ */
+uint32_t rf_read_freq(void)
+{
+    uint32_t freq;
+    uint8_t temp[4];
+
+    rf_read_spec_page_regs(PAGE3_SEL, 0x09, temp, 4);
+    freq = ((uint32_t)temp[3] << 24) | ((uint32_t)temp[2] << 16) | ((uint32_t)temp[1] << 8) | (uint32_t)temp[0];
+
+    return freq;
+}
+
+/**
+ * @brief calculate tx time
+ * @param[in] <size> tx len
+ * @return tx time(us)
+ */
+uint32_t rf_get_tx_time(uint8_t size)
+{
+    uint8_t sf = rf_get_sf();
+    uint8_t cr = rf_get_code_rate();
+    uint8_t bw = rf_get_bw();
+    uint8_t ldr = rf_get_ldr();
+    uint32_t preamble = rf_get_preamble();
+    const float bw_table[4] = {62.5f, 125.0f, 250.0f, 500.0f};
+    float symbol_len;      /* symbol length: ms */
+    float preamble_time;   /* preamble time: ms */
+    float payload_time = 0;/* payload time: ms */
+    float total_time;      /* total time: ms */
+
+    if (bw < BW_62_5K || bw > BW_500K)
+    {
+        return 0;
+    }
+
+
+    symbol_len = (float)(1UL << sf) / bw_table[bw - BW_62_5K]; /* ms */
+
+    if (sf < 7)
+    {
+        preamble_time = (preamble + 6.25f) * symbol_len;
+        payload_time = ceil((float)(size * 8 - sf * 4 + 36) / ((sf - ldr * 2) * 4));
+    }
+    else
+    {
+        preamble_time = (preamble + 4.25f) * symbol_len;
+        payload_time = ceil((float)(size * 8 - sf * 4 + 44) / ((sf - ldr * 2) * 4));
+    }
+
+    payload_time = payload_time * (cr + 4);
+    payload_time = payload_time + 8;
+    payload_time = payload_time * symbol_len;
+    total_time = (preamble_time + payload_time) * 1000;
+
+    return (uint32_t)total_time;
+}
+
+/**
+ * @brief check if ldr should be turned on
+ * 
+ * @param sf 
+ * @param bw 
+ * @return true 
+ * @return false 
+ */
+bool rf_should_turnon_ldr(uint8_t sf, uint8_t bw) 
+{
+    if (sf == SF_11)
+    {
+        if (bw == BW_62_5K || bw == BW_125K)
+        {
+            return true;
+        }
+    }
+    else if (sf == SF_12)
+    {
+        if (bw == BW_62_5K || bw == BW_125K || bw == BW_250K)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @brief set bandwidth
+ * @param[in] <bw_val> value relate to bandwidth
+ *			  BW_62_5K / BW_125K / BW_250K / BW_500K
+ * @return result
+ */
+RF_Err_t rf_set_bw(uint8_t bw)
+{
+    uint8_t sf, ldr;
+
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x0D, bw, BIT7|BIT6|BIT5|BIT4));
+
+    sf = rf_get_sf();
+    
+    ldr = rf_should_turnon_ldr(sf, bw);
+
+    rf_set_ldr(ldr);
+
+    if (bw == BW_62_5K || bw == BW_125K || bw == BW_250K)
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE2_SEL, 0x3F, BIT1));
+    }
+    else
+    {
+        RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE2_SEL, 0x3F, BIT1));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief read bandwidth
+ * @param[in] <none>
+ * @return bandwidth
+ */
+uint8_t rf_get_bw(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE3_SEL, 0x0d);
+
+    return (tmpreg >> 4);
+}
+
+/**
+ * @brief set spread factor
+ * @param[in] <sf> spread factor to set
+ *			 SF_5 / SF_6 /SF_7 / SF_8 / SF_9 / SF_10 / SF_11 / SF_12
+ * @return result
+ */
+RF_Err_t rf_set_sf(uint8_t sf)
+{
+    uint8_t bw, ldr;
+	
+    if(sf < SF_5 || sf > SF_12)
+    {
+        return FAIL;
+    }
+
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x0E, sf, BIT7|BIT6|BIT5|BIT4));
+
+    bw = rf_get_bw();
+    
+    ldr = rf_should_turnon_ldr(sf, bw);
+
+    rf_set_ldr(ldr);
+
+    return OK;
+}
+
+/**
+ * @brief read Spreading Factor
+ * @param[in] <none>
+ * @return Spreading Factor
+ */
+uint8_t rf_get_sf(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE3_SEL, 0x0E);
+
+    return (tmpreg >> 4);
+}
+
+/**
+ * @brief set payload CRC
+ * @param[in] <NewState> CRC to set
+ *			  CRC_ON / CRC_OFF
+ * @return result
+ */
+RF_Err_t rf_set_crc(bool NewState)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x0E, NewState, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief read payload CRC
+ * @param[in] <none>
+ * @return CRC status
+ */
+uint8_t rf_get_crc(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE3_SEL, 0x0e);
+
+    return (tmpreg & 0x08) >> 3;
+}
+
+/**
+ * @brief set code rate
+ * @param[in] <code_rate> code rate to set
+ *			  CODE_RATE_45 / CODE_RATE_46 / CODE_RATE_47 / CODE_RATE_48
+ * @return result
+ */
+RF_Err_t rf_set_code_rate(uint8_t code_rate)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x0D, code_rate, BIT3|BIT2|BIT1));
+
+    return OK;
+}
+
+/**
+ * @brief get code rate
+ * @param[in] <none>
+ * @return code rate
+ */
+uint8_t rf_get_code_rate(void)
+{
+    uint8_t tmpreg;
+	uint8_t code_rate;
+
+    tmpreg = rf_read_spec_page_reg(PAGE3_SEL, 0x0D);
+    code_rate = ((tmpreg & 0x0E) >> 1); // BIT3|BIT2|BIT1
+
+    return code_rate;
+}
+
+/**
+ * @brief set rf mode
+ * @param[in] <mode>
+ *			  RF_MODE_DEEP_SLEEP / RF_MODE_SLEEP
+ *			  RF_MODE_STB1 / RF_MODE_STB2
+ *			  RF_MODE_STB3 / RF_MODE_TX / RF_MODE_RX
+ * @return result
+ */
+RF_Err_t rf_set_mode(uint8_t mode)
+{
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, mode));
+
+    return OK;
+}
+
+/**
+ * @brief get rf mode
+ * @param[in] <none>
+ * @return mode
+ *		   RF_MODE_DEEP_SLEEP / RF_MODE_SLEEP
+ *		 RF_MODE_STB1 / RF_MODE_STB2
+ *		 RF_MODE_STB3 / RF_MODE_TX / RF_MODE_RX
+ */
+uint8_t rf_get_mode(void)
+{
+    return rf_read_reg(REG_OP_MODE);
+}
+
+/**
+ * @brief set rf Tx mode
+ * @param[in] <tx_mode>
+ *			  RF_TX_SINGLE/RF_TX_CONTINOUS
+ * @return result
+ */
+RF_Err_t rf_set_tx_mode(uint8_t tx_mode)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x06, tx_mode, BIT2));
+
+    return OK;
+}
+
+/**
+ * @brief set rf Rx mode
+ * @param[in] <mode>
+ *			  RF_RX_SINGLE/RF_RX_SINGLE_TIMEOUT/RF_RX_CONTINOUS
+ * @return result
+ */
+RF_Err_t rf_set_rx_mode(uint8_t rx_mode)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x06, rx_mode, BIT1|BIT0));
+
+    return OK;
+}
+
+/**
+ * @brief set modem mode
+ * @param[in] <modem_mode>
+ *			  MODEM_MODE_NORMAL / MODEM_MODE_MULTI_SECTOR
+ * @return result
+ */
+RF_Err_t rf_set_modem_mode(uint8_t modem_mode)
+{
+    if (modem_mode == MODEM_MODE_NORMAL)
+    {
+        RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x0b, 0x08));
+    }
+    else if (modem_mode == MODEM_MODE_MULTI_SECTOR)
+    {
+        RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x0b, 0x18));
+        RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x2f, 0x54));
+        RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x30, 0x40));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief set timeout for Rx. It is useful in RF_RX_SINGLE_TIMEOUT mode
+ * @param[in] <timeout> rx single timeout time(in ms)
+ * @return result
+ */
+RF_Err_t rf_set_rx_single_timeout(uint16_t timeout)
+{
+    uint8_t temp[2];
+
+    temp[0] = (uint8_t)(timeout & 0xFF);
+    temp[1] = (uint8_t)((timeout >> 8) & 0xFF);
+    RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x07, temp, 2));
+
+    return OK;
+}
+
+/**
+ * @brief get snr value
+ * @param[in] <none>
+ * @return snr
+ */
+float rf_get_snr(void)
+{
+    float snr_val;
+    uint32_t sig_pow_val;
+    uint32_t noise_pow_val;
+    uint32_t sf_val;
+    uint8_t temp[3];
+
+    rf_read_spec_page_regs(PAGE2_SEL, 0x71, temp, 3);
+    noise_pow_val = ((temp[2] << 16) | (temp[1] << 8) | temp[0]);
+
+    rf_read_spec_page_regs(PAGE1_SEL, 0x74, temp, 3);
+    sig_pow_val = ((temp[2] << 16) | (temp[1] << 8) | temp[0]);
+
+    sf_val = (rf_read_spec_page_reg(PAGE1_SEL, 0x7c) & 0xf0) >> 4;
+
+    if (noise_pow_val == 0)
+    {
+        noise_pow_val = 1;
+    }
+
+    snr_val = (float)(10 * log10((sig_pow_val / (2 << sf_val)) / noise_pow_val));
+
+    return snr_val;
+}
+
+/**
+ * @brief get rssi value
+ * @param[in] <none>
+ * @return rssi
+ */
+int8_t rf_get_rssi(void)
+{
+    return rf_read_spec_page_reg(PAGE1_SEL, 0x7F);
+}
+
+/**
+ * @brief current channel energy detection
+ * @param[in] <none>
+ * @return rssi
+ */
+int8_t rf_get_channel_rssi(void)
+{
+    int8_t rssi_energy;
+
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE2_SEL, 0x06, BIT2));
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE2_SEL, 0x06, BIT2));
+
+    rssi_energy = rf_read_spec_page_reg(PAGE1_SEL, 0x7E);
+
+    return rssi_energy;
+}
+
+/**
+ * @brief set tx_power
+ * @param[in] <tx_power> open gears (range in 1--23（405MHz-565MHz）1-22(868/915MHz))
+ * @return result
+ */
+RF_Err_t rf_set_tx_power(uint8_t tx_power)
+{
+    uint8_t tmp_value1, tmp_value2, pa_bias;
+    uint32_t freq, pwr_table;
+
+    if (tx_power < RF_MIN_RAMP)
+    {
+        tx_power = RF_MIN_RAMP;
+    }
+
+    freq = rf_read_freq();
+
+    if ((freq >= freq_405000000) && (freq <= freq_565000000))
+    {
+        if (tx_power > RF_MAX_RAMP + 1)
+        {
+            tx_power = RF_MAX_RAMP;
+        }
+
+        /* modulate wave ramp mode */
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x1E, power_ramp_cfg[tx_power - 1].ramp, 0x3F));
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x4B, power_ramp_cfg[tx_power - 1].pa_ldo >> 4, 0x0F));
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x22, power_ramp_cfg[tx_power - 1].pa_ldo & 0x01, BIT0));
+
+        if (power_ramp_cfg[tx_power - 1].pa_duty != 0x70)
+        {
+            RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x46, BIT2));
+        }
+        else
+        {
+            RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE0_SEL, 0x46, BIT2));
+        }
+        rf_efuse_on();
+        pa_bias = rf_efuse_read_encry_byte(0x3b, 0x5aa5, 0x0d + 19);
+        rf_efuse_off();
+        if (pa_bias == 0)
+        {
+            pa_bias = 8;
+        }
+
+        tmp_value1 = pa_bias - (power_ramp_cfg[tx_power - 1].pa_duty & 0x0f);
+        tmp_value2 = (power_ramp_cfg[tx_power - 1].pa_duty & 0xf0) | tmp_value1;
+        RF_ASSERT(rf_write_spec_page_reg(PAGE0_SEL, 0x45, tmp_value2));
+
+        return OK;
+    }
+    else if ((freq >= freq_810000000) && (freq <= freq_890000000))
+    {
+        pwr_table = 2;
+    }
+    else if ((freq >= freq_890000000) && (freq <= freq_1080000000))
+    {
+        pwr_table = 3;
+    }
+    else
+    {
+        return FAIL;
+    }
+
+    if (tx_power > RF_MAX_RAMP)
+    {
+        tx_power = RF_MAX_RAMP;
+    }
+
+    // modulate wave ramp mode
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x1E, power_ramp[tx_power - 1][pwr_table].ramp, 0x3F));
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x4B, power_ramp[tx_power - 1][pwr_table].pa_trim, 0x0F));
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x22, power_ramp[tx_power - 1][pwr_table].pa_ldo, BIT0));
+
+    if (power_ramp[tx_power - 1][pwr_table].pa_duty != 0xff)
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x46, BIT2));
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x45, power_ramp[tx_power - 1][pwr_table].pa_duty, BIT6|BIT5|BIT4));
+    }
+    else
+    {
+        RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE0_SEL, 0x46, BIT2));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief get tx_power
+ * @param[in] <none>
+ * @return tx_power if return value is 0,means get tx_power fail
+ */
+uint8_t rf_get_tx_power(void)
+{
+    uint8_t open_ramp, pa_trim, pa_ldo, pa_duty, pa_duty_en;
+    uint8_t i, pa_bias;
+    uint32_t freq, pwr_table;
+
+    open_ramp = rf_read_spec_page_reg(PAGE0_SEL, 0x1e) & 0x3f;
+    pa_trim = rf_read_spec_page_reg(PAGE0_SEL, 0x4b) & 0x0f;
+    pa_ldo = rf_read_spec_page_reg(PAGE3_SEL, 0x22) & 0x01;
+    pa_duty = ((rf_read_spec_page_reg(PAGE0_SEL, 0x45) & 0x70) >> 4);
+    pa_duty_en = ((rf_read_spec_page_reg(PAGE0_SEL, 0x46) & 0x04) >> 2);
+
+    freq = rf_read_freq();
+
+    if ((freq >= freq_405000000) && (freq <= freq_565000000))
+    {
+        rf_efuse_on();
+        pa_bias = rf_efuse_read_encry_byte(0x3b, 0x5aa5, 0x0d + 19);
+        rf_efuse_off();
+        if (pa_bias == 0)
+        {
+            pa_bias = 8;
+        }
+        pa_duty = rf_read_spec_page_reg(PAGE0_SEL, 0x45);
+        for (i = 0; i < RF_MAX_RAMP + 1; i++)
+        {
+            if (open_ramp == power_ramp_cfg[i].ramp)
+            {
+                if (((pa_trim << 4) | pa_ldo) == power_ramp_cfg[i].pa_ldo)
+                {
+                    if ((pa_duty_en == true) && ((pa_duty + (power_ramp_cfg[i].pa_duty & 0x0f)) == ((power_ramp_cfg[i].pa_duty & 0xf0) + pa_bias)))
+                    {
+                        return i + 1;
+                    }
+                    else if ((pa_duty_en == false) && ((pa_duty | 0x70) == ((power_ramp_cfg[i].pa_duty & 0xf0) + pa_bias)))
+                    {
+                        return i + 1;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+    else if ((freq >= freq_810000000) && (freq <= freq_890000000))
+    {
+        pwr_table = 2;
+    }
+    else if ((freq >= freq_890000000) && (freq <= freq_1080000000))
+    {
+        pwr_table = 3;
+    }
+    else
+    {
+        return FAIL;
+    }
+
+    for (i = 0; i < RF_MAX_RAMP; i++)
+    {
+        if (open_ramp == power_ramp[i][pwr_table].ramp)
+        {
+            if ((pa_trim == power_ramp[i][pwr_table].pa_trim) && (pa_ldo == power_ramp[i][pwr_table].pa_ldo))
+            {
+                if ((pa_duty_en == true) && (pa_duty == power_ramp[i][pwr_table].pa_duty))
+                {
+                    return i + 1;
+                }
+                else if ((pa_duty_en == false) && (0xff == power_ramp[i][pwr_table].pa_duty))
+                {
+                    return i + 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief set preamble
+ * @param[in] preamble
+ * @return result
+ */
+RF_Err_t rf_set_preamble(uint16_t preamble)
+{
+    uint8_t temp[2];
+
+    temp[0] = (uint8_t)(preamble & 0xFF);
+    temp[1] = (uint8_t)((preamble >> 8) & 0xFF);
+    RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x13, temp, 2));
+
+    return OK;
+}
+
+/**
+ * @brief get preamble
+ * @param[in] <none>
+ * @return preamble
+ */
+uint16_t rf_get_preamble(void)
+{
+    uint8_t temp[2];
+
+    rf_read_spec_page_regs(PAGE3_SEL, 0x13, temp, 2);
+
+    return ((uint16_t)temp[1] << 8) | temp[0];
+}
+
+/**
+ * @brief set RF GPIO as input
+ * @param[in] <gpio_pin>  pin number of GPIO to be enable
+ * @return result
+ */
+RF_Err_t rf_set_gpio_input(uint8_t gpio_pin)
+{
+    if(gpio_pin < 8)
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x63, (1 << gpio_pin)));
+    }
+    else
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x64, (1 << (gpio_pin - 8))));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief set RF GPIO as output
+ * @param[in] <gpio_pin>  pin number of GPIO to be enable
+ * @return result
+ */
+RF_Err_t rf_set_gpio_output(uint8_t gpio_pin)
+{
+    if(gpio_pin < 8)
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x65, (1 << gpio_pin)));
+    }
+    else
+    {
+        RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x66, (1 << (gpio_pin - 8))));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief set GPIO output state, SET or RESET
+ * @param[in] <gpio_pin>  pin number of GPIO to be opearted
+ *			<state>   0  -  reset,
+ *					  1  -  set
+ * @return result
+ */
+RF_Err_t rf_set_gpio_state(uint8_t gpio_pin, uint8_t state)
+{
+    if(gpio_pin < 8)
+    {
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x67, state, (1 << gpio_pin)));
+    }
+    else
+    {
+        RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x68, state, (1 << (gpio_pin - 8))));
+    }
+
+    return OK;
+}
+
+/**
+ * @brief get GPIO input state
+ * @param[in] <gpio_pin>  pin number of GPIO to be opearted
+ *			<state>   0  -  low,
+ *					  1  -  high
+ * @return result
+ */
+bool rf_get_gpio_state(uint8_t gpio_pin)
+{
+    uint8_t tmpreg;
+
+    if(gpio_pin < 6)
+    {
+        tmpreg = rf_read_spec_page_reg(PAGE0_SEL, 0x74);
+    }
+    else
+    {
+        tmpreg = rf_read_spec_page_reg(PAGE0_SEL, 0x75);
+        gpio_pin -= 6;
+    }
+
+    return (bool)((tmpreg >> gpio_pin) & 0x01);
+}
+
+/**
+ * @brief CAD function enable
+ * @param[in] <none>
+ * @return  result
+ */
+RF_Err_t rf_cad_on(uint8_t threshold, uint8_t chirps)
+{
+    rf_set_gpio_output(11);
+
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE0_SEL, 0x5E, BIT6));
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE1_SEL, 0x25, chirps, BIT0|BIT1));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x0f, threshold));
+
+    return OK;
+}
+
+/* @brief CAD function disable
+* @param[in] <none>
+* @return  result
+*/
+RF_Err_t rf_cad_off(void)
+{
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x5E, BIT6));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x0f, 0x0a));
+
+    return OK;
+}
+
+/**
+ * @brief set rf syncword
+ * @param[in] <sync> syncword
+ * @return result
+ */
+RF_Err_t rf_set_syncword(uint8_t sync)
+{
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x0f, sync));
+    
+    return OK;
+}
+
+/**
+ * @brief read rf syncword
+ * @param[in] <none>
+ * @return syncword
+ */
+uint8_t rf_get_syncword(void)
+{
+   return rf_read_spec_page_reg(PAGE3_SEL, 0x0f);
+}
+
+/**
+ * @brief send one packet
+ * @param[in] <buff> buffer contain data to send
+ * @param[in] <len> the length of data to send
+ * @return result
+ */
+RF_Err_t rf_send_packet(uint8_t *buff, int len)
+{
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, REG_PAYLOAD_LEN, len));
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_TX));
+
+    rf_write_fifo(REG_FIFO_ACC_ADDR, buff, len);
+
+    return OK;
+}
+
+/**
+ * @brief receive a packet in non-block method, it will return 0 when no data got
+ * @param[in] <buff> buffer provide for data to receive
+ * @return length, it will return 0 when no data got
+ */
+uint8_t rf_recv_packet(uint8_t *buff)
+{
+    uint8_t len;
+
+    len = rf_read_spec_page_reg(PAGE1_SEL, 0x7D);
+    rf_read_fifo(REG_FIFO_ACC_ADDR, buff, len);
+
+    return len;
+}
+
+/**
+ * @brief set early interruption
+ * @param[in] <earlyirq_val> PLHD IRQ to set
+ *			  PLHD_IRQ_ON / PLHD_IRQ_OFF
+ * @return result
+ */
+RF_Err_t rf_set_early_irq(bool NewState)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE1_SEL, 0x2B, NewState, BIT6));
+
+    return OK;
+}
+
+/**
+ * @brief read plhd irq status
+ * @param[in] <none>
+ * @return plhd irq status
+ */
+bool rf_get_early_irq(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE1_SEL, 0x2B);
+
+    return (bool)(!!(tmpreg&BIT6));
+}
+
+/**
+ * @brief set plhd
+ * @param[in] <addr> PLHD start addr,Range:0..7f
+ *			  <len> PLHD len
+ *			  PLHD_LEN8 / PLHD_LEN16
+ * @return result
+ */
+RF_Err_t rf_set_plhd(uint8_t addr, uint8_t len)
+{
+    uint8_t tmpreg = ((addr & 0x7f) | (len << 7));
+
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x2e, tmpreg));
+
+    return OK;
+}
+
+/**
+ * @brief get plhd len reg value
+ * @param[in] <none>
+ * @return <len> PLHD_LEN8 / PLHD_LEN16
+ */
+uint8_t rf_get_plhd_len(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE1_SEL, 0x2e);
+
+    return ((tmpreg & 0x80) >> 7);
+}
+
+/**
+ * @brief set plhd mask
+ * @param[in] <plhd_val> plhd mask to set
+ *			  PLHD_ON / PLHD_OFF
+ * @return result
+ */
+RF_Err_t rf_set_plhd_mask(uint8_t plhd_val)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x58, plhd_val, BIT4));
+
+    return OK;
+}
+
+/**
+ * @brief read plhd mask
+ * @param[in] <none>
+ * @return plhd mask
+ */
+uint8_t rf_get_plhd_mask(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE0_SEL, 0x58);
+
+    return tmpreg;
+}
+
+/**
+ * @brief receive a packet in non-block method, it will return 0 when no data got
+ * @param[in] <buff> buffer provide for data to receive
+ *			  <len> PLHD_LEN8 / PLHD_LEN16
+ * @return result
+ */
+uint8_t rf_plhd_receive(uint8_t *buf, uint8_t len)
+{
+    if (len == PLHD_LEN8)
+    {
+        rf_read_spec_page_regs(PAGE2_SEL, 0x76, buf, 8);
+        return 8;
+    }
+    else if (len == PLHD_LEN16)
+    {
+        rf_read_spec_page_regs(PAGE2_SEL, 0x76, buf, 10);
+        rf_read_spec_page_regs(PAGE0_SEL, 0x76, &buf[10], 6);
+        return 16;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief set rf plhd mode on , rf will use early interruption
+ * @param[in] <addr> PLHD start addr,Range:0..7f
+		      <len> PLHD len
+			  PLHD_LEN8 / PLHD_LEN16
+ * @return result
+ */
+void rf_set_plhd_rx_on(uint8_t addr, uint8_t len)
+{
+    rf_set_early_irq(PLHD_IRQ_ON);
+    rf_set_plhd(addr, len);
+    rf_set_plhd_mask(PLHD_ON);
+}
+
+/**
+ * @brief set rf plhd mode off
+ * @param[in] <none>
+ * @return result
+ */
+void rf_set_plhd_rx_off(void)
+{
+    rf_set_early_irq(PLHD_IRQ_OFF);
+    rf_set_plhd_mask(PLHD_OFF);
+}
+
+/**
+ * @brief set dcdc mode, The default configuration is DCDC_OFF, rf should set DCDC_OFF before enter sleep/deepsleep
+ * @param[in] <dcdc_val> dcdc switch
+ *			  DCDC_ON / DCDC_OFF
+ * @return result
+ */
+RF_Err_t rf_set_dcdc_mode(uint8_t dcdc_val)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x24, dcdc_val, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief set LDR mode
+ * @param[in] <mode> LDR switch
+ *			  LDR_ON / LDR_OFF
+ * @return result
+ */
+RF_Err_t rf_set_ldr(uint32_t mode)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x12, mode, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief get LDR mode
+ * @param[in] <none>
+ * @return result LDR_ON / LDR_OFF
+ */
+bool rf_get_ldr(void)
+{
+    uint8_t tmpreg = rf_read_spec_page_reg(PAGE3_SEL, 0x12);
+
+    return (bool)(!!(tmpreg&BIT3));
+}
+
+int calculate_chirp_count(int sf_range[], int size, int chirp_counts[])
+{
+    int i, j;
+    
+    for (i = 0; i < size; i++) {
+        int sf = sf_range[i];
+        int fft_length = 1<<sf;
+        int chirp_points = fft_length;
+        int rx_points = 0;
+        int preamble_length;
+        int quotient;
+        int remainder;
+        int chirp_count;
+
+        for (j = 0; j < size; j++) {
+            int rx_sf = sf_range[j];
+            int rx_chirp_points = (1<<rx_sf)* 2;
+            rx_points += rx_chirp_points;
+        }
+
+        preamble_length = rx_points;
+        quotient = preamble_length / chirp_points;
+        remainder = preamble_length % chirp_points;
+        
+        if (remainder > 0) {
+            chirp_count = (quotient + 1) + 2;  // Add 2 for safety margin
+        } else {
+            chirp_count = quotient + 2;
+        }
+        
+        if (chirp_count < 8) {
+            chirp_count = 8;
+        }
+        
+        chirp_counts[i] = chirp_count;
+    }
+    
+    return size;
+}
+
+/**
+ * @brief set preamble by Spreading Factor,It is useful in all_sf_search mode
+ * @param[in] <sf> Spreading Factor
+ * @return result
+ */
+RF_Err_t rf_set_auto_sf_tx_preamble(int sf, int sf_range[], int size, int chirp_counts[])
+{
+    int i;
+
+    for (i = 0; i < size; i++) {
+		if( sf == sf_range[i])
+		{
+			RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x13, (chirp_counts[i]& 0xff)));
+			RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x14, ((chirp_counts[i] >> 8) & 0xff)));
+			return OK;
+		}
+	}
+	
+    return FAIL;
+}
+
+/**
+ * @brief open all sf auto-search mode
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_auto_sf_rx_on(int sf_range[], int size)
+{
+    int i;
+    uint8_t sf_mask = 0;
+
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE3_SEL, 0x12, BIT0));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x25, 0x04));
+    for (i = 0; i < size; i++) {
+
+		sf_mask |= (1 << (sf_range[i] - 5));
+		
+	}
+
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x2d, sf_mask));
+
+    return OK;
+}
+
+/**
+ * @brief close all sf auto-search mode
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_auto_sf_rx_off(void)
+{
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE3_SEL, 0x12, BIT0));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x14, 0));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x13, 8));
+
+    return OK;
+}
+
+/**
+ * @brief set carrier_wave mode on,Set BW and SF before calling this function
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_carrier_wave_on(void)
+{
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+
+    RF_ASSERT(rf_set_tx_mode(RF_TX_CONTINOUS));
+    RF_ASSERT(rf_set_tx_power(RF_MAX_RAMP));
+
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE1_SEL, 0x1E, BIT0));
+
+    return OK;
+}
+
+/**
+ * @brief set carrier_wave mode frequence and send carrier_wave
+ * @param[in] <freq> RF frequency(in Hz) to set
+ * @return result
+ */
+RF_Err_t rf_set_carrier_wave_freq(uint32_t freq)
+{
+    uint8_t buf[1];
+
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+    RF_ASSERT(rf_set_tx_mode(RF_TX_CONTINOUS));
+    RF_ASSERT(rf_set_freq(freq));
+    RF_ASSERT(rf_set_ldo_pa_on());
+
+    rf_port.set_tx();
+
+    RF_ASSERT(rf_send_packet(buf, 1));
+
+    return OK;
+}
+
+/**
+ * @brief set carrier_wave mode off
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_carrier_wave_off(void)
+{
+    RF_ASSERT(rf_write_reg(REG_OP_MODE, RF_MODE_STB3));
+    RF_ASSERT(rf_set_ldo_pa_off());
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE1_SEL, 0x1E, BIT0));
+
+    return OK;
+}
+
+/**
+ * @brief set mapm mode enable
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_mapm_en(void)
+{
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE1_SEL, 0x38, BIT0));
+
+    return OK;
+}
+
+/**
+ * @brief set mapm mode disable
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_mapm_dis(void)
+{
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE1_SEL, 0x38, BIT0));
+
+    return OK;
+}
+
+/**
+ * @brief set mapm mask
+ * @param[in] <mapm_val> mapm mask to set
+ *			  MAPM_ON / MAPM_OFF
+ * @return result
+ */
+RF_Err_t rf_set_mapm_mask(uint8_t mapm_val)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE0_SEL, 0x58, mapm_val, !BIT6));
+
+    return OK;
+}
+
+/**
+ * @brief get the number of fields
+ * @param[in] <none>
+
+ * @return <fn>
+ */
+uint8_t rf_get_mapm_field_num(void)
+{
+    uint8_t reg_fn, fn_h, fn_l, fn;
+
+    reg_fn = rf_read_spec_page_reg(PAGE1_SEL, 0x3d);
+    fn_h = ((reg_fn >> 4) - 1) * 15;
+    fn_l = (reg_fn & 0x0f) - 1;
+    fn = fn_h + fn_l;
+
+    return fn;
+}
+
+/**
+ * @brief set the number of fields(range in 0x01~0xe0)
+ * @param[in] <fn> the number of fields you want to set
+
+ * @return result
+ */
+RF_Err_t rf_set_mapm_field_num(uint8_t fn)
+{
+    uint8_t reg_fn, fn_h, fn_l;
+
+    fn_h = fn / 15 + 1;
+    fn_l = fn % 15 + 1;
+    reg_fn = (fn_h << 4) + fn_l;
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x3d, reg_fn));
+
+    return OK;
+}
+
+/**
+ * @brief set the unit code word of the field counter represents several fields
+ * @param[in] <fnm> the represents number you want to set
+              0--1
+              1--2
+              2--4
+              3--8
+ * @return result
+ */
+RF_Err_t rf_set_mapm_field_num_mux(uint8_t fnm)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE1_SEL, 0x37, fnm, BIT7|BIT6));
+
+    return OK;
+}
+
+/**
+ * @brief set the last group function selection
+ * @param[in] <group_fun_sel> The last group in the Field, its ADDR position function selection
+ *             0:ordinary address      1:Field counter
+ * @return result
+ */
+RF_Err_t rf_set_mapm_group_fun_sel(uint8_t gfs)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE1_SEL, 0x38, gfs, BIT1));
+
+    return OK;
+}
+
+/**
+ * @brief set the number of groups in Field
+ * @param[in] <gn> the number of groups
+
+ * @return result
+ */
+RF_Err_t rf_set_mapm_group_num(uint8_t gn)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE1_SEL, 0x38, gn, BIT3|BIT2));
+
+    return OK;
+}
+
+/**
+ * @brief set the number of Preambles in first groups
+ * @param[in] <pgl> The numbers want set to Preambles in first groups(at least 10)
+
+ * @return result
+ */
+RF_Err_t rf_set_mapm_firgroup_preamble_num(uint8_t pgl)
+{
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x3b, pgl));
+
+    return OK;
+}
+
+/**
+ * @brief set the number of preambles for groups other than the first group
+ * @param[in] <pgn>  the number of Preambles in other groups
+ * @return result
+ */
+RF_Err_t rf_set_mapm_group_preamble_num(uint8_t pgn)
+{
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x3c, pgn));
+
+    return OK;
+}
+
+/**
+ * @brief set group address1 of mapm mode
+ * @param[in] <addr> The value of group address1 you want to set
+
+ * @return result
+ */
+RF_Err_t rf_set_mapm_neces_preamble_num(uint16_t pn)
+{
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE1_SEL, 0x39, (uint8_t)(pn >> 8), 0x0F));
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x3A, (uint8_t)(pn)));
+
+    return OK;
+}
+
+/**
+ * @brief set group address4 of mapm mode
+ * @param[in] <addr> The value of group address4 you want to set
+
+ * @return result
+ */
+RF_Err_t rf_set_mapm_addr(uint8_t addr_no, uint8_t addr)
+{
+    RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x3e + addr_no, addr));
+
+    return OK;
+}
+
+/**
+ * @brief calculate mapm preamble can sleep time
+ * @param[in] <none>
+ * @return sleeptime(ms)
+ */
+uint32_t rf_calculate_mapm_preambletime(stc_mapm_cfg_t *mapm_cfg, uint32_t one_chirp_time)
+{
+    uint8_t fnm, gn, pgn, pg1, fn, pn;
+    uint16_t one_field_chirp, chirp_num;
+    uint32_t preamble_time;
+
+    pn = mapm_cfg->pn;
+    pgn = mapm_cfg->pgn;
+    pg1 = mapm_cfg->pg1;
+    gn = mapm_cfg->gn;
+    fnm = mapm_cfg->fnm;
+    fn = mapm_cfg->fn;
+    one_field_chirp = pg1 + 2 + (pgn + 2) * gn;
+    chirp_num = (1 << fnm) * fn * one_field_chirp + pn - one_field_chirp;
+    preamble_time = one_chirp_time * chirp_num;
+
+    return preamble_time / 1000;
+}
+
+/**
+ * @brief set rf mapm mode on , rf will use mapm interruption
+ * @param[in] <none>
+ * @return result
+ */
+void rf_set_mapm_on(void)
+{
+    rf_mapm_en();
+    rf_set_mapm_mask(MAPM_ON);
+}
+
+/**
+ * @brief set mapm mode off
+ * @param[in] <none>
+ * @return result
+ */
+void rf_set_mapm_off(void)
+{
+    rf_mapm_dis();
+    rf_set_mapm_mask(MAPM_OFF);
+}
+
+/**
+ * @brief configure relevant parameters used in mapm mode
+ * @param[in] <p_mapm_cfg>
+              <fn>set the number of fields(range in 0x01~0xe0)
+              <field_num_mux> The unit code word of the Field counter represents several Fields
+              <group_fun_sel> The last group in the Field, its ADDR position function selection
+              0:ordinary address      1:Field counter
+              <gn> register for configuring the number of groups in a Field
+              0 1group\1 2group\2 3group\3 4group
+              <pgl>set the number of Preambles in first groups>
+              <pgn> the number of Preambles in other groups
+              <pn> the number of chirps before syncword after all fields have been sent
+ * @return result
+ */
+void rf_set_mapm_cfg(stc_mapm_cfg_t *p_mapm_cfg)
+{
+    rf_set_mapm_field_num(p_mapm_cfg->fn);
+    rf_set_mapm_field_num_mux(p_mapm_cfg->fnm);
+    rf_set_mapm_group_fun_sel(p_mapm_cfg->gfs);
+    rf_set_mapm_group_num(p_mapm_cfg->gn);
+    rf_set_mapm_firgroup_preamble_num(p_mapm_cfg->pg1);
+    rf_set_mapm_group_preamble_num(p_mapm_cfg->pgn);
+    rf_set_mapm_neces_preamble_num(p_mapm_cfg->pn);
+}
+
+/**
+ * @brief efuse function enable
+ * @param[in] <none>
+ * @return  result
+ */
+RF_Err_t rf_efuse_on(void)
+{
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE2_SEL, 0x3E, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief efuse function disable
+ * @param[in] <none>
+ * @return  result
+ */
+RF_Err_t rf_efuse_off(void)
+{
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE2_SEL, 0x3E, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief read efuse area data in unencrypted mode
+ * @param[in] <reg_addr> Efuse Register address, customer uses a fixed setting of 0x3c
+              <efuse_addr> aaddress want to read data in efuse, customer's usage range is 0x2d~0x7f
+ * @return data
+ */
+uint8_t rf_efuse_read_byte(uint8_t reg_addr, uint8_t efuse_addr)
+{
+    uint8_t value = 0;
+    uint16_t timeout = 100;
+
+    efuse_addr <<= 1;
+    rf_switch_page(PAGE2_SEL);
+    rf_write_fifo(reg_addr, &efuse_addr, 1);
+    do
+    {
+        if (rf_read_spec_page_reg(PAGE0_SEL, 0x6c) & 0x80)
+        {
+            break;
+        }
+    } while (timeout--);
+
+    rf_switch_page(PAGE2_SEL);
+    rf_read_fifo(reg_addr, &value, 1);
+
+    return value;
+}
+
+/**
+ * @brief write efuse area data in unencrypted mode
+ * @param[in] <reg_addr> Efuse Register address, customer uses a fixed setting of 0x3c
+              <efuse_addr> address want to write data in efuse, customer's usage range is 0x2d~0x7f
+              <value> data want to write in efuse
+ * @return <none>
+ */
+void rf_efuse_write_byte(uint8_t reg_addr, uint8_t efuse_addr, uint8_t value)
+{
+    uint8_t data_buf[2];
+    uint16_t timeout = 100;
+
+    data_buf[0] = (efuse_addr << 1) | 0x01;
+    data_buf[1] = value;
+
+    rf_switch_page(PAGE2_SEL);
+    rf_write_fifo(reg_addr, data_buf, 2);
+    do
+    {
+        if (rf_read_spec_page_reg(PAGE0_SEL, 0x6c) & 0x80)
+        {
+            break;
+        }
+    } while (timeout--);
+}
+
+/**
+ * @brief read efuse data for initialize
+ * @return data
+ */
+uint8_t rf_efuse_read_encry_byte(uint8_t reg_addr, uint16_t pattern, uint8_t efuse_addr)
+{
+    uint8_t data_buf[3];
+    uint8_t value = 0;
+    uint16_t timeout = 100;
+
+    data_buf[0] = pattern >> 8;
+    data_buf[1] = pattern & 0xff;
+    data_buf[2] = efuse_addr << 1;
+
+    rf_switch_page(PAGE2_SEL);
+    rf_write_fifo(reg_addr, data_buf, sizeof(data_buf));
+    do
+    {
+        if (rf_read_spec_page_reg(PAGE0_SEL, 0x6C) & BIT7)
+        {
+            break;
+        }
+    } while (timeout--);
+    rf_switch_page(PAGE2_SEL);
+    rf_read_fifo(reg_addr, &value, 1);
+
+    return value;
+}
+
+/**
+ * @brief enable DCDC calibration
+ * @param[in] <calibr_type> calibrated point
+              1--ref calibration
+              2--zero calibration
+              3--imax calibration
+ * @return result
+ */
+RF_Err_t rf_set_dcdc_calibr_on(uint8_t calibr_type)
+{
+    uint8_t loop_time;
+    uint8_t dcdc_cal;
+    uint8_t rd_data;
+    uint8_t wr_data;
+    uint8_t offset_reg_addr;
+
+    if ((calibr_type < CALIBR_REF_CMP) || (calibr_type > CALIBR_IMAX_CMP))
+    {
+        return FAIL;
+    }
+
+    loop_time = 5;
+    dcdc_cal  = 0;
+    rd_data   = 0;
+    wr_data   = 0;
+    offset_reg_addr = 0x1D; /* default */
+
+    if (calibr_type == CALIBR_ZERO_CMP)
+    {
+        offset_reg_addr = 0x1E;
+    }
+    else if (calibr_type == CALIBR_REF_CMP)
+    {
+        offset_reg_addr = 0x1D;
+    }
+    else /* CALIBR_IMAX_CMP */
+    {
+        offset_reg_addr = 0x1C;
+    }
+
+    /* calibration on */
+    RF_ASSERT(rf_write_spec_page_reg_bits(PAGE3_SEL, 0x20, calibr_type, BIT5|BIT6));
+
+    for (; loop_time > 0; loop_time--)
+    {
+        dcdc_cal |= (uint8_t)(0x01u << (loop_time - 1));
+    }
+
+    /* 下面保持你原本逻辑（从你原文件继续往下） */
+    /* rd_data = rf_read_spec_page_reg(PAGE3_SEL, offset_reg_addr); ... */
+    /* …… */
+    return OK;
+}
+
+/**
+ * @brief disable DCDC calibration
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_dcdc_calibr_off(void)
+{
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE3_SEL, 0x20, BIT5|BIT6));
+
+    return OK;
+}
+
+/**
+ * @brief enable LDO PA
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_ldo_pa_on(void)
+{    
+    RF_ASSERT(rf_set_spec_page_reg_bits(PAGE0_SEL, 0x4F, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief disable LDO PA
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_ldo_pa_off(void)
+{
+    RF_ASSERT(rf_reset_spec_page_reg_bits(PAGE0_SEL, 0x4F, BIT3));
+
+    return OK;
+}
+
+/**
+ * @brief rf enter rx continous mode to receive packet
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_enter_continous_rx(void)
+{
+    RF_ASSERT(rf_set_mode(RF_MODE_STB3));
+
+    rf_port.set_rx();
+
+    RF_ASSERT(rf_set_rx_mode(RF_RX_CONTINOUS));
+    RF_ASSERT(rf_set_mode(RF_MODE_RX));
+
+    return OK;
+}
+
+/**
+ * @brief rf enter rx single timeout mode to receive packet
+ * @param[in] <timeout> rx single timeout time(in ms)
+ * @return result
+ */
+RF_Err_t rf_enter_single_timeout_rx(uint32_t timeout)
+{
+    RF_ASSERT(rf_set_mode(RF_MODE_STB3));
+
+    rf_port.set_rx();
+
+    RF_ASSERT(rf_set_rx_mode(RF_RX_SINGLE_TIMEOUT));
+    RF_ASSERT(rf_set_rx_single_timeout(timeout));
+    RF_ASSERT(rf_set_mode(RF_MODE_RX));
+
+    return OK;
+}
+
+/**
+ * @brief rf enter rx single mode to receive packet
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_enter_single_rx(void)
+{
+    RF_ASSERT(rf_set_mode(RF_MODE_STB3));
+
+    rf_port.set_rx();
+
+    RF_ASSERT(rf_set_rx_mode(RF_RX_SINGLE));
+    RF_ASSERT(rf_set_mode(RF_MODE_RX));
+
+    return OK;
+}
+
+/**
+ * @brief rf enter single tx mode and send packet
+ * @param[in] <buf> buffer contain data to send
+ * @param[in] <size> the length of data to send
+ * @param[in] <tx_time> the packet tx time(us)
+ * @return result
+ */
+RF_Err_t rf_single_tx_data(uint8_t *buf, uint8_t size, uint32_t *tx_time)
+{
+    RF_ASSERT(rf_set_mode(RF_MODE_STB3));
+    RF_ASSERT(rf_set_ldo_pa_on());
+
+    rf_port.set_tx();
+
+    RF_ASSERT(rf_set_tx_mode(RF_TX_SINGLE));
+
+    *tx_time = rf_get_tx_time(size);
+
+    RF_ASSERT(rf_send_packet(buf, size));
+
+    return OK;
+}
+
+/**
+ * @brief rf enter continous tx mode to ready send packet
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_enter_continous_tx(void)
+{
+    RF_ASSERT(rf_set_mode(RF_MODE_STB3));
+    RF_ASSERT(rf_set_tx_mode(RF_TX_CONTINOUS));
+
+    return OK;
+}
+
+/**
+ * @brief rf continous mode send packet
+ * @param[in] <buf> buffer contain data to send
+ * @param[in] <size> the length of data to send
+ * @return result
+ */
+RF_Err_t rf_continous_tx_send_data(uint8_t *buf, uint8_t size)
+{
+    RF_ASSERT(rf_set_ldo_pa_on());
+
+    rf_port.set_tx();
+
+    RF_ASSERT(rf_send_packet(buf, size));
+
+    return OK;
+}
+
+/**
+ * @brief RF IRQ server routine, it should be call at ISR of IRQ pin
+ * @param[in] <none>
+ * @return result
+ */
+void rf_irq_process(void)
+{
+	if(CHECK_IRQ())
+  {
+		uint8_t irq = rf_get_irq();
+		if(irq & REG_IRQ_RX_PLHD_DONE)
+		{
+				RxDoneParams.PlhdSize = rf_get_plhd_len();
+				RxDoneParams.PlhdSize = rf_plhd_receive(RxDoneParams.PlhdPayload, RxDoneParams.PlhdSize);
+				irq &= ~REG_IRQ_RX_PLHD_DONE;
+				rf_clr_irq(REG_IRQ_RX_PLHD_DONE);
+				rf_set_recv_flag(RADIO_FLAG_PLHDRXDONE);
+		}
+		if(irq & REG_IRQ_MAPM_DONE)
+		{
+				uint8_t addr_val = rf_read_spec_page_reg(PAGE0_SEL, 0x6e);
+				RxDoneParams.mpam_recv_buf[RxDoneParams.mpam_recv_index++] = addr_val;
+				irq &= ~REG_IRQ_MAPM_DONE;
+				rf_clr_irq(REG_IRQ_MAPM_DONE);
+				rf_set_recv_flag(RADIO_FLAG_MAPM);
+		}
+		if(irq & REG_IRQ_RX_DONE)
+		{
+				RxDoneParams.Snr = rf_get_snr();
+				RxDoneParams.Rssi = rf_get_rssi();
+				RxDoneParams.Size = rf_recv_packet(RxDoneParams.Payload);
+				irq &= ~REG_IRQ_RX_DONE;
+				rf_clr_irq(REG_IRQ_RX_DONE);
+				rf_set_recv_flag(RADIO_FLAG_RXDONE);
+		}
+		if(irq & REG_IRQ_CRC_ERR)
+		{
+				rf_read_fifo(REG_FIFO_ACC_ADDR, RxDoneParams.TestModePayload, 10);
+				irq &= ~REG_IRQ_CRC_ERR;
+				rf_clr_irq(REG_IRQ_CRC_ERR);
+				rf_set_recv_flag(RADIO_FLAG_RXERR);
+		}
+		if(irq & REG_IRQ_RX_TIMEOUT)
+		{
+				rf_refresh();
+				irq &= ~REG_IRQ_RX_TIMEOUT;
+				rf_clr_irq(REG_IRQ_RX_TIMEOUT);
+				rf_set_recv_flag(RADIO_FLAG_RXTIMEOUT);
+		}
+		if(irq & REG_IRQ_TX_DONE)
+		{
+				rf_set_ldo_pa_off();
+				irq &= ~REG_IRQ_TX_DONE;
+				rf_clr_irq(REG_IRQ_TX_DONE);
+				rf_set_transmit_flag(RADIO_FLAG_TXDONE);
+		}
+	}
+}
+
+/**
+ * @brief get one chirp time
+ * @param[in] <bw>,<sf>
+ * @return <time> us
+ */
+uint32_t rf_get_chirp_time(uint8_t bw, uint8_t sf)
+{
+    const uint32_t bw_table[4] = {62500, 125000, 250000, 500000};
+
+    if(bw < BW_62_5K || bw > BW_500K)
+    {
+        return 0;
+    }
+
+    return (1000000 / bw_table[bw - BW_62_5K]) * (1 << sf);
+}
+
+/**
+ * @brief check cad rx inactive
+ * @param[in] <one_chirp_time>
+ * @return <result> LEVEL_ACTIVE/LEVEL_INACTIVE
+ */
+bool check_cad_rx_inactive(uint32_t one_chirp_time)
+{
+    rf_delay_us(one_chirp_time * 7);
+    rf_delay_us(360); // state machine start up time after enter rx state
+
+    if (CHECK_CAD() != 1)
+    {
+        rf_set_mode(RF_MODE_STB3);
+        return LEVEL_INACTIVE;
+    }
+
+    return LEVEL_ACTIVE;
+}
+
+void set_test_mode1_reg(void)
+{
+ uint8_t tempreg;
+
+ tempreg = rf_read_spec_page_reg(PAGE3_SEL,0x12);
+ rf_write_spec_page_reg(PAGE1_SEL,0x25,0x48);
+ rf_write_spec_page_reg(PAGE3_SEL,0x12,(0x02|(tempreg&0x08)));
+
+}
+/**
+ * @brief set rf default para
+ * @param[in] <none>
+ * @return result
+ */
+RF_Err_t rf_set_default_para(void)
+{
+	
+#if defined( USE_MODEM_LORA )		
+	set_test_mode1_reg();//LoRa模式
+	RF_ASSERT(rf_set_crc(CRC_OFF));//关闭CRC	
+#else	
+	RF_ASSERT(rf_set_crc(CRC_ON));
+#endif	
+	
+    RF_ASSERT(rf_set_freq(DEFAULT_FREQ));
+    RF_ASSERT(rf_set_code_rate(DEFAULT_CR));
+    RF_ASSERT(rf_set_bw(DEFAULT_BW));
+    RF_ASSERT(rf_set_sf(DEFAULT_SF));	   
+    RF_ASSERT(rf_set_tx_power(DEFAULT_PWR));
+	  printf("FREQ= %d  SF=%d   BW=%d  CR=%d \r\n",DEFAULT_FREQ,DEFAULT_SF,DEFAULT_BW,DEFAULT_CR);
+    return OK;
+}
+
+static uint8_t rf_read_reg_repeat(uint8_t addr, uint8_t times, uint8_t *minv, uint8_t *maxv)
+{
+    uint8_t v;
+    uint8_t mn;
+    uint8_t mx;
+    uint8_t i;
+
+    mn = 0xFFu;
+    mx = 0x00u;
+
+    for (i = 0; i < times; i++)
+    {
+        v = rf_read_reg(addr);
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+
+    if (minv) *minv = mn;
+    if (maxv) *maxv = mx;
+    return v;
+}
+
+static void dbg_puts_hex8(const char *prefix, uint8_t v)
+{
+    dbg_puts(prefix);
+    dbg_puts("0x");
+    dbg_put_hex8(v);
+    dbg_puts("\r\n");
+}
+
+uint8_t rf_spi_self_test(void)
+{
+    /* declarations MUST be at top in C90 */
+    uint8_t mn, mx;
+    uint8_t old_pl;
+    uint8_t r1, r2, r3;
+    uint8_t p0[6];
+    uint8_t p3[6];
+    uint8_t i;
+    uint8_t wr_ok;
+    uint8_t cross_ok;
+    uint8_t ok;
+
+    dbg_puts("\r\n[RF][SPI] ===== SPI SELF TEST BEGIN =====\r\n");
+
+    /* 1) repeat read stability */
+    rf_read_reg_repeat(REG_SYS_CTL, 8u, &mn, &mx);
+    dbg_puts("[RF][SPI] REG_SYS_CTL(0x00) repeat min=");
+    dbg_puts("0x"); dbg_put_hex8(mn);
+    dbg_puts(" max=0x"); dbg_put_hex8(mx);
+    dbg_puts("\r\n");
+
+    rf_read_reg_repeat(REG_OP_MODE, 8u, &mn, &mx);
+    dbg_puts("[RF][SPI] REG_OP_MODE(0x02) repeat min=");
+    dbg_puts("0x"); dbg_put_hex8(mn);
+    dbg_puts(" max=0x"); dbg_put_hex8(mx);
+    dbg_puts("\r\n");
+
+    rf_read_reg_repeat(0x04u, 8u, &mn, &mx);
+    dbg_puts("[RF][SPI] REG_0x04 repeat min=");
+    dbg_puts("0x"); dbg_put_hex8(mn);
+    dbg_puts(" max=0x"); dbg_put_hex8(mx);
+    dbg_puts("\r\n");
+
+    if (mn != mx)
+    {
+        dbg_puts("[RF][SPI] WARN: register read is NOT stable (min!=max)\r\n");
+    }
+
+    /* 2) write/readback test (choose a R/W register, REG_PAYLOAD_LEN=0x0C) */
+    old_pl = rf_read_reg(REG_PAYLOAD_LEN);
+    dbg_puts_hex8("[RF][SPI] REG_PAYLOAD_LEN old=", old_pl);
+
+    rf_write_reg(REG_PAYLOAD_LEN, 0x5Au);
+    r1 = rf_read_reg(REG_PAYLOAD_LEN);
+    dbg_puts_hex8("[RF][SPI] write 0x5A -> read ", r1);
+
+    rf_write_reg(REG_PAYLOAD_LEN, 0xA5u);
+    r2 = rf_read_reg(REG_PAYLOAD_LEN);
+    dbg_puts_hex8("[RF][SPI] write 0xA5 -> read ", r2);
+
+    rf_write_reg(REG_PAYLOAD_LEN, old_pl); /* restore */
+    r3 = rf_read_reg(REG_PAYLOAD_LEN);
+    dbg_puts_hex8("[RF][SPI] restore -> read ", r3);
+
+    wr_ok = (uint8_t)((r1 == 0x5Au) && (r2 == 0xA5u) && (r3 == old_pl));
+    if (!wr_ok)
+    {
+        dbg_puts("[RF][SPI] FAIL: write/readback mismatch!\r\n");
+    }
+
+    /* 3) cross-page consistency: read 0x00~0x05 in PAGE0 and PAGE3 */
+    rf_switch_page(PAGE0_SEL);
+    for (i = 0; i < 6u; i++)
+    {
+        p0[i] = rf_read_reg(i);
+    }
+
+    rf_switch_page(PAGE3_SEL);
+    for (i = 0; i < 6u; i++)
+    {
+        p3[i] = rf_read_reg(i);
+    }
+
+    dbg_puts("[RF][SPI] PAGE0 0x00~0x05: ");
+    for (i = 0; i < 6u; i++)
+    {
+        dbg_put_hex8(p0[i]);
+        if (i != 5u) dbg_send_byte(' ');
+    }
+    dbg_puts("\r\n");
+
+    dbg_puts("[RF][SPI] PAGE3 0x00~0x05: ");
+    for (i = 0; i < 6u; i++)
+    {
+        dbg_put_hex8(p3[i]);
+        if (i != 5u) dbg_send_byte(' ');
+    }
+    dbg_puts("\r\n");
+
+    cross_ok = 1u;
+    for (i = 0; i < 6u; i++)
+    {
+        if (p0[i] != p3[i])
+        {
+            cross_ok = 0u;
+            break;
+        }
+    }
+    if (!cross_ok)
+    {
+        dbg_puts("[RF][SPI] FAIL: page-cross mismatch (0x00~0x05)!\r\n");
+    }
+
+    ok = (uint8_t)(wr_ok && cross_ok);
+
+    dbg_puts("[RF][SPI] ===== SPI SELF TEST ");
+    dbg_puts(ok ? "PASS" : "FAIL");
+    dbg_puts(" =====\r\n");
+
+    return ok;
+}
+
