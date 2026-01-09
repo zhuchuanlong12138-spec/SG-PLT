@@ -17,9 +17,6 @@
 
 #include "ddl.h"
 #include "clk.h"
-#include "gpio.h"
-#include "uart.h"
-#include "bt.h"
 #include "delay.h"
 #include "dbg.h"
 
@@ -35,14 +32,11 @@
 /* #define APP_ROLE_SELECT      (APP_ROLE_SELECT_COORD) */
 
 /*==================== 通用配置 ====================*/
-#define DBG_UART_CH             (UARTCH1)
 #define DBG_UART_BAUD           (115200u)
 
 #define HEARTBEAT_PERIOD_MS     (1000u)
 
-/* 你原例程一致的IO（别删） */
-#define T1_PORT                 (3)
-#define T1_PIN                  (3)
+
 
 /* 网络参数（两块板必须 PAN_ID 一致） */
 #define APP_PAN_ID              (DL2807_MAC_DEFAULT_PAN_ID)
@@ -62,19 +56,7 @@
 dl2807_mac_ctx_t g_mac;
 volatile uint32_t g_ms = 0u;
 
-/*==================== UART RX（中断读SBUF） ====================*/
-static volatile uint8_t g_rx_flag = 0u;
-static volatile uint8_t g_rx_ch   = 0u;
-
-static void RxIntCallback(void)
-{
-    g_rx_ch = (uint8_t)M0P_UART1->SBUF;
-    g_rx_flag = 1u;
-}
-
-static void ErrIntCallback(void)
-{
-}
+/* UART 相关（初始化/接收）已全部移入 dbg.c */
 
 /*==================== SysTick 1ms ====================*/
 void SysTick_Handler(void)
@@ -150,72 +132,6 @@ void dl2807_mac_on_frame_indication(const dl2807_mac_ctx_t *ctx,
 #endif
 }
 
-/*==================== UART1 初始化：官方例程方式 ====================*/
-static void uart1_init_official(uint32_t baud)
-{
-    uint16_t timer;
-    uint32_t pclk;
-
-    stc_uart_config_t         stcConfig;
-    stc_uart_irq_cb_t         stcUartIrqCb;
-    stc_uart_multimode_t      stcMulti;
-    stc_uart_baud_config_t    stcBaud;
-    stc_bt_config_t           stcBtConfig;
-
-    DDL_ZERO_STRUCT(stcConfig);
-    DDL_ZERO_STRUCT(stcUartIrqCb);
-    DDL_ZERO_STRUCT(stcMulti);
-    DDL_ZERO_STRUCT(stcBaud);
-    DDL_ZERO_STRUCT(stcBtConfig);
-
-    timer = 0u;
-    pclk  = 0u;
-
-    Gpio_InitIO(T1_PORT, T1_PIN, GpioDirIn);
-    Gpio_InitIO(0, 3, GpioDirOut);
-    Gpio_SetIO(0, 3, 1);
-
-    Gpio_InitIOExt(3, 5, GpioDirOut, TRUE, FALSE, FALSE, FALSE);
-    Gpio_InitIOExt(3, 6, GpioDirOut, TRUE, FALSE, FALSE, FALSE);
-
-    Gpio_SetFunc_UART1TX_P35();
-    Gpio_SetFunc_UART1RX_P36();
-
-    Clk_SetPeripheralGate(ClkPeripheralBt, TRUE);
-    Clk_SetPeripheralGate(ClkPeripheralUart1, TRUE);
-
-    stcUartIrqCb.pfnRxIrqCb    = RxIntCallback;
-    stcUartIrqCb.pfnTxIrqCb    = NULL;
-    stcUartIrqCb.pfnRxErrIrqCb = ErrIntCallback;
-
-    stcConfig.pstcIrqCb  = &stcUartIrqCb;
-    stcConfig.bTouchNvic = TRUE;
-    stcConfig.enRunMode  = UartMode3;
-
-    stcMulti.enMulti_mode   = UartNormal;
-    stcConfig.pstcMultiMode = &stcMulti;
-
-    stcBaud.bDbaud  = 0u;
-    stcBaud.u32Baud = baud;
-    stcBaud.u8Mode  = UartMode3;
-
-    pclk  = Clk_GetPClkFreq();
-    timer = Uart_SetBaudRate(UARTCH1, pclk, &stcBaud);
-
-    stcBtConfig.enMD = BtMode2;
-    stcBtConfig.enCT = BtTimer;
-
-    Bt_Init(TIM1, &stcBtConfig);
-    Bt_ARRSet(TIM1, timer);
-    Bt_Cnt16Set(TIM1, timer);
-    Bt_Run(TIM1);
-
-    Uart_Init(UARTCH1, &stcConfig);
-    Uart_EnableIrq(UARTCH1, UartRxIrq);
-    Uart_ClrStatus(UARTCH1, UartRxFull);
-    Uart_EnableFunc(UARTCH1, UartRx);
-}
-
 /*==================== 心跳打印（含CTRL状态） ====================*/
 static void print_heartbeat(void)
 {
@@ -268,7 +184,8 @@ int32_t main(void)
     last_hb = 0u;
     hclk    = 0u;
 
-    uart1_init_official(DBG_UART_BAUD);
+    /* UART1 配置全部放到 dbg 模块中 */
+    dbg_uart_init(DBG_UART_BAUD);
 
     dbg_puts("\r\n\r\n==============================\r\n");
     dbg_puts("[BOOT] dl2807 split-main start\r\n");
@@ -315,23 +232,22 @@ int32_t main(void)
         app_node_task();
 #endif
 
-        if (g_rx_flag)
         {
             uint8_t ch;
-            ch = g_rx_ch;
-            g_rx_flag = 0u;
-
-            if (ch == (uint8_t)'m')
+            if (dbg_getc(&ch))
             {
-                main_print_help();
-            }
-            else
-            {
+                if (ch == (uint8_t)'m')
+                {
+                    main_print_help();
+                }
+                else
+                {
 #if (APP_ROLE_SELECT == APP_ROLE_SELECT_COORD)
-                app_coord_on_cmd(ch);
+                    app_coord_on_cmd(ch);
 #else
-                app_node_on_cmd(ch);
+                    app_node_on_cmd(ch);
 #endif
+                }
             }
         }
 

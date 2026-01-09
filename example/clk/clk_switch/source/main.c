@@ -134,28 +134,28 @@ int32_t main(void)
     Clk_SwitchTo(ClkRCH);
     u32Val = Clk_GetHClkFreq();
 
-    //XTH
-    Clk_SwitchTo(ClkXTH);
-    u32Val = Clk_GetHClkFreq();
+//    //XTH
+//    Clk_SwitchTo(ClkXTH);
+//    u32Val = Clk_GetHClkFreq();
 
-    //XTL
-    Clk_SwitchTo(ClkXTL);
-    u32Val = Clk_GetHClkFreq();
-    
-    //RCL   38.4K
-    Clk_SetRCLFreq(ClkFreq38_4K);
-    Clk_SwitchTo(ClkRCL);
-    u32Val = Clk_GetHClkFreq();
+//    //XTL
+//    Clk_SwitchTo(ClkXTL);
+//    u32Val = Clk_GetHClkFreq();
+//    
+//    //RCL   38.4K
+//    Clk_SetRCLFreq(ClkFreq38_4K);
+//    Clk_SwitchTo(ClkRCL);
+//    u32Val = Clk_GetHClkFreq();
 
-    //RCL 32768
-    Clk_SetRCLFreq(ClkFreq32768);
-    u32Val = Clk_GetHClkFreq();
+//    //RCL 32768
+//    Clk_SetRCLFreq(ClkFreq32768);
+//    u32Val = Clk_GetHClkFreq();
 
-    ///< \todo check 2nd version 
-    Clk_SwitchTo(ClkRCL);
-    Clk_SetRCHFreq(ClkFreq4Mhz);
-    Clk_SwitchTo(ClkRCH);
-    u32Val = Clk_GetHClkFreq();
+//    ///< \todo check 2nd version 
+//    Clk_SwitchTo(ClkRCL);
+//    Clk_SetRCHFreq(ClkFreq4Mhz);
+//    Clk_SwitchTo(ClkRCH);
+//    u32Val = Clk_GetHClkFreq();
 
     while (1);
 

@@ -1,6 +1,7 @@
 #include "dbg.h"
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "ddl.h"
 #include "clk.h"
@@ -8,54 +9,24 @@
 #include "uart.h"
 #include "bt.h"
 
-static void dbg_put_hex4(uint8_t v)
-{
-    v = (uint8_t)(v & 0x0Fu);
-    if (v < 10u)
-    {
-        dbg_send_byte((uint8_t)('0' + v));
-    }
-    else
-    {
-        dbg_send_byte((uint8_t)('A' + (v - 10u)));
-    }
-}
-
-/*==================== UART RX（中断读SBUF，缓存 1 字节） ====================*/
+/*==================== UART1 RX：中断缓存 ====================*/
 static volatile uint8_t s_rx_flag = 0u;
 static volatile uint8_t s_rx_ch   = 0u;
 
 static void RxIntCallback(void)
 {
-    /* 官方例程：RX 中断直接读 SBUF 清中断 */
-    s_rx_ch = (uint8_t)M0P_UART1->SBUF;
+    /* 读SBUF清中断源（按你原main.c写法） */
+    s_rx_ch   = (uint8_t)M0P_UART1->SBUF;
     s_rx_flag = 1u;
 }
 
 static void ErrIntCallback(void)
 {
-    /* 暂不处理错误中断（如需可在这里加打印/计数） */
+    /* 可按需增加错误统计/清标志 */
 }
 
-bool dbg_getc(uint8_t *ch)
-{
-    if (ch == 0)
-    {
-        return false;
-    }
-
-    if (s_rx_flag == 0u)
-    {
-        return false;
-    }
-
-    *ch = s_rx_ch;
-    s_rx_flag = 0u;
-    return true;
-}
-
-/*==================== UART1 初始化：从 main 移入 dbg ====================*/
-void dbg_uart_init(uint32_t baud)
+/*==================== UART1 初始化（官方例程方式：Mode3 + BT定时器） ====================*/
+static void dbg_uart1_init_mode3(uint32_t baud)
 {
     uint16_t timer;
     uint32_t pclk;
@@ -75,7 +46,7 @@ void dbg_uart_init(uint32_t baud)
     timer = 0u;
     pclk  = 0u;
 
-    /* 你原例程一致的IO（别删） */
+    /* 你原工程里保留的IO初始化（别删） */
     Gpio_InitIO(3, 3, GpioDirIn);
     Gpio_InitIO(0, 3, GpioDirOut);
     Gpio_SetIO(0, 3, 1);
@@ -83,15 +54,15 @@ void dbg_uart_init(uint32_t baud)
     Gpio_InitIOExt(3, 5, GpioDirOut, TRUE, FALSE, FALSE, FALSE);
     Gpio_InitIOExt(3, 6, GpioDirOut, TRUE, FALSE, FALSE, FALSE);
 
-    /* UART1: P35=TX, P36=RX */
+    /* UART1 Pinmux：P35 TX / P36 RX */
     Gpio_SetFunc_UART1TX_P35();
     Gpio_SetFunc_UART1RX_P36();
 
-    /* 打开外设时钟门控 */
+    /* 外设门控 */
     Clk_SetPeripheralGate(ClkPeripheralBt, TRUE);
     Clk_SetPeripheralGate(ClkPeripheralUart1, TRUE);
 
-    /* 绑定中断回调 */
+    /* 中断回调 */
     stcUartIrqCb.pfnRxIrqCb    = RxIntCallback;
     stcUartIrqCb.pfnTxIrqCb    = NULL;
     stcUartIrqCb.pfnRxErrIrqCb = ErrIntCallback;
@@ -103,7 +74,7 @@ void dbg_uart_init(uint32_t baud)
     stcMulti.enMulti_mode   = UartNormal;
     stcConfig.pstcMultiMode = &stcMulti;
 
-    /* 波特率配置 */
+    /* 波特率计算基于PCLK —— 所以必须在“切外部晶振后”再调用本函数 */
     stcBaud.bDbaud  = 0u;
     stcBaud.u32Baud = baud;
     stcBaud.u8Mode  = UartMode3;
@@ -111,7 +82,7 @@ void dbg_uart_init(uint32_t baud)
     pclk  = Clk_GetPClkFreq();
     timer = Uart_SetBaudRate(UARTCH1, pclk, &stcBaud);
 
-    /* BT 作为 UART1 波特率定时器 */
+    /* BT TIM1 作为波特率发生器 */
     stcBtConfig.enMD = BtMode2;
     stcBtConfig.enCT = BtTimer;
 
@@ -120,11 +91,52 @@ void dbg_uart_init(uint32_t baud)
     Bt_Cnt16Set(TIM1, timer);
     Bt_Run(TIM1);
 
-    /* UART 初始化并开启 RX 中断 */
+    /* UART init + 开RX中断 + 开接收 */
     Uart_Init(UARTCH1, &stcConfig);
     Uart_EnableIrq(UARTCH1, UartRxIrq);
     Uart_ClrStatus(UARTCH1, UartRxFull);
     Uart_EnableFunc(UARTCH1, UartRx);
+}
+
+/*==================== 对外API ====================*/
+void dbg_init(uint32_t baud)
+{
+    /* 清缓存状态 */
+    s_rx_flag = 0u;
+    s_rx_ch   = 0u;
+
+    dbg_uart1_init_mode3(baud);
+}
+
+bool dbg_getch_nonblock(uint8_t *ch)
+{
+    if (ch == 0)
+    {
+        return false;
+    }
+
+    if (s_rx_flag)
+    {
+        *ch = s_rx_ch;
+        s_rx_flag = 0u;
+        return true;
+    }
+
+    return false;
+}
+
+/*==================== 打印实现（沿用你当前dbg.c） ====================*/
+static void dbg_put_hex4(uint8_t v)
+{
+    v = (uint8_t)(v & 0x0Fu);
+    if (v < 10u)
+    {
+        dbg_send_byte((uint8_t)('0' + v));
+    }
+    else
+    {
+        dbg_send_byte((uint8_t)('A' + (v - 10u)));
+    }
 }
 
 void dbg_send_byte(uint8_t b)
