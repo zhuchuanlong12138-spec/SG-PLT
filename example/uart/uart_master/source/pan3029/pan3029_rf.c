@@ -38,53 +38,21 @@ static int packet_received = RADIO_FLAG_IDLE;
 */
 static int packet_transmit = RADIO_FLAG_IDLE;
 
-/* --- rw mask auto-detect (C90 compatible) --- */
-static uint8_t g_pan3029_rw_read_mask = 0x80;
-static uint8_t g_pan3029_rw_inited = 0;
-
+/* --- SPI Access (datasheet 9.1) -------------------------------------------
+ * Address Byte = addr[6:0] + wr[0]
+ *   wr = 1 : write
+ *   wr = 0 : read
+ * i.e.
+ *   cmd_read  = (addr << 1) | 0
+ *   cmd_write = (addr << 1) | 1
+ * -------------------------------------------------------------------------- */
 static uint8_t spi_xfer(uint8_t v)
 {
     return rf_port.spi_readwrite(v);
 }
 
-static uint8_t pan3029_read_raw(uint8_t addr_with_mask)
-{
-    uint8_t val;
-
-    rf_port.spi_cs_low();
-    spi_xfer(addr_with_mask);
-    val = spi_xfer(0x00);
-    rf_port.spi_cs_high();
-
-    return val;
-}
-
-static void pan3029_write_raw(uint8_t addr_with_mask, uint8_t value)
-{
-    rf_port.spi_cs_low();
-    spi_xfer(addr_with_mask);
-    spi_xfer(value);
-    rf_port.spi_cs_high();
-}
-
-static void pan3029_detect_rw_mask(void)
-{
-    uint8_t r04_a, r04_b;
-
-    r04_a = pan3029_read_raw((uint8_t)(0x04 | 0x80)); /* read via |0x80 */
-    r04_b = pan3029_read_raw((uint8_t)(0x04 & 0x7F)); /* read via &0x7F */
-
-    /* 你目前读到的 REG04 稳定是 0x06，用它强判 */
-    if ((r04_a == 0x06) && (r04_b != 0x06))
-        g_pan3029_rw_read_mask = 0x80;
-    else if ((r04_b == 0x06) && (r04_a != 0x06))
-        g_pan3029_rw_read_mask = 0x00;
-    else
-        g_pan3029_rw_read_mask = 0x80; /* fallback */
-
-    g_pan3029_rw_inited = 1;
-}
-
+static uint8_t pan_cmd_read(uint8_t addr)  { return (uint8_t)((addr << 1) | 0u); }
+static uint8_t pan_cmd_write(uint8_t addr) { return (uint8_t)((addr << 1) | 1u); }
 
 struct RxDoneMsg RxDoneParams;
 
@@ -164,10 +132,14 @@ static uint8_t __ctz(uint8_t val)
 //}
 uint8_t rf_read_reg(uint8_t addr)
 {
-    if (!g_pan3029_rw_inited)
-        pan3029_detect_rw_mask();
+    uint8_t val;
 
-    return pan3029_read_raw((uint8_t)(addr | g_pan3029_rw_read_mask));
+    rf_port.spi_cs_low();
+    (void)spi_xfer(pan_cmd_read(addr));
+    val = spi_xfer(0x00u);
+    rf_port.spi_cs_high();
+
+    return val;
 }
 
 /**
@@ -196,16 +168,19 @@ uint8_t rf_read_reg(uint8_t addr)
 //}
 uint8_t rf_write_reg(uint8_t addr, uint8_t value)
 {
-    if (!g_pan3029_rw_inited)
-        pan3029_detect_rw_mask();
+    rf_port.spi_cs_low();
+    (void)spi_xfer(pan_cmd_write(addr));
+    (void)spi_xfer(value);
+    rf_port.spi_cs_high();
 
-    /* 写地址和读地址通常是相反语义：读用|0x80，则写用&0x7F；反之亦然 */
-    if (g_pan3029_rw_read_mask == 0x80)
-        pan3029_write_raw((uint8_t)(addr & 0x7F), value);
-    else
-        pan3029_write_raw((uint8_t)(addr | 0x80), value);
+#if SPI_WRITE_CHECK
+    if (rf_read_reg(addr) != value)
+    {
+        return FAIL;
+    }
+#endif
 
-    return 0;
+    return OK;
 }
 
 /**
@@ -2681,113 +2656,142 @@ static void dbg_puts_hex8(const char *prefix, uint8_t v)
 uint8_t rf_spi_self_test(void)
 {
     /* declarations MUST be at top in C90 */
-    uint8_t mn, mx;
-    uint8_t old_pl;
-    uint8_t r1, r2, r3;
-    uint8_t p0[6];
-    uint8_t p3[6];
-    uint8_t i;
-    uint8_t wr_ok;
-    uint8_t cross_ok;
+    uint8_t r00, r02, r04;
+    uint8_t page0_r00, page3_r00;
+    uint8_t old_page;
+    uint8_t w, rb;
     uint8_t ok;
+
+    ok = 1u;
 
     dbg_puts("\r\n[RF][SPI] ===== SPI SELF TEST BEGIN =====\r\n");
 
-    /* 1) repeat read stability */
-    rf_read_reg_repeat(REG_SYS_CTL, 8u, &mn, &mx);
-    dbg_puts("[RF][SPI] REG_SYS_CTL(0x00) repeat min=");
-    dbg_puts("0x"); dbg_put_hex8(mn);
-    dbg_puts(" max=0x"); dbg_put_hex8(mx);
+    /* -------- Basic sanity read (page0) -------- */
+    r00 = rf_read_reg(REG_SYS_CTL);
+    r02 = rf_read_reg(REG_OP_MODE);
+    r04 = rf_read_reg(0x04u);
+
+    dbg_puts("[RF][SPI] REG00(SYS_CTL)=0x"); dbg_put_hex8(r00);
+    dbg_puts(" REG02(OP_MODE)=0x"); dbg_put_hex8(r02);
+    dbg_puts(" REG04=0x"); dbg_put_hex8(r04);
     dbg_puts("\r\n");
 
-    rf_read_reg_repeat(REG_OP_MODE, 8u, &mn, &mx);
-    dbg_puts("[RF][SPI] REG_OP_MODE(0x02) repeat min=");
-    dbg_puts("0x"); dbg_put_hex8(mn);
-    dbg_puts(" max=0x"); dbg_put_hex8(mx);
+    /* If everything is 0x00 or 0xFF, SPI likely not working (MISO floating / CS issue) */
+    if (((r00 | r02 | r04) == 0x00u) || ((r00 & r02 & r04) == 0xFFu)) {
+        dbg_puts("[RF][SPI] WARN: basic regs look like all 00/FF, check wiring/CS/MISO\r\n");
+        /* do not early-fail here because REG00/02 can be 0x00 in some modes; continue with RW test */
+    }
+
+    /* -------- Reliable read/write test (REG0x04 bit4) --------
+     * In your PRETEST this RW path works, so keep the self-test aligned.
+     */
+    w  = (uint8_t)(r04 ^ 0x10u);   /* toggle bit4 */
+    rf_write_reg(0x04u, w);
+    rb = rf_read_reg(0x04u);
+
+    dbg_puts("[RF][SPI] toggle REG04 bit4: write 0x"); dbg_put_hex8(w);
+    dbg_puts(" -> read 0x"); dbg_put_hex8(rb);
     dbg_puts("\r\n");
 
-    rf_read_reg_repeat(0x04u, 8u, &mn, &mx);
-    dbg_puts("[RF][SPI] REG_0x04 repeat min=");
-    dbg_puts("0x"); dbg_put_hex8(mn);
-    dbg_puts(" max=0x"); dbg_put_hex8(mx);
+    /* restore */
+    rf_write_reg(0x04u, r04);
+
+    if (rb != w) {
+        dbg_puts("[RF][SPI] FAIL: REG04 write/readback mismatch!\r\n");
+        ok = 0u;
+    }
+
+    /* -------- Page switch verification --------
+     * NOTE: Different pages have different register maps; page0 and page3 dumps are EXPECTED to differ.
+     * We only verify that page bits can be set/read back.
+     */
+    old_page = (uint8_t)(r00 & 0x0Fu);
+
+    /* switch to page0 */
+    rf_write_reg(REG_SYS_CTL, (uint8_t)((r00 & 0xF0u) | 0x00u));
+    page0_r00 = rf_read_reg(REG_SYS_CTL);
+
+    /* switch to page3 */
+    rf_write_reg(REG_SYS_CTL, (uint8_t)((r00 & 0xF0u) | 0x03u));
+    page3_r00 = rf_read_reg(REG_SYS_CTL);
+
+    dbg_puts("[RF][SPI] page switch check: page0 REG00=0x"); dbg_put_hex8(page0_r00);
+    dbg_puts(" page3 REG00=0x"); dbg_put_hex8(page3_r00);
     dbg_puts("\r\n");
 
-    if (mn != mx)
-    {
-        dbg_puts("[RF][SPI] WARN: register read is NOT stable (min!=max)\r\n");
+    if ( (page0_r00 & 0x0Fu) != 0x00u || (page3_r00 & 0x0Fu) != 0x03u ) {
+        dbg_puts("[RF][SPI] FAIL: page bits not taking effect (REG00 low nibble)\r\n");
+        ok = 0u;
     }
 
-    /* 2) write/readback test (choose a R/W register, REG_PAYLOAD_LEN=0x0C) */
-    old_pl = rf_read_reg(REG_PAYLOAD_LEN);
-    dbg_puts_hex8("[RF][SPI] REG_PAYLOAD_LEN old=", old_pl);
+    /* restore original page */
+    rf_write_reg(REG_SYS_CTL, (uint8_t)((r00 & 0xF0u) | old_page));
 
-    rf_write_reg(REG_PAYLOAD_LEN, 0x5Au);
-    r1 = rf_read_reg(REG_PAYLOAD_LEN);
-    dbg_puts_hex8("[RF][SPI] write 0x5A -> read ", r1);
-
-    rf_write_reg(REG_PAYLOAD_LEN, 0xA5u);
-    r2 = rf_read_reg(REG_PAYLOAD_LEN);
-    dbg_puts_hex8("[RF][SPI] write 0xA5 -> read ", r2);
-
-    rf_write_reg(REG_PAYLOAD_LEN, old_pl); /* restore */
-    r3 = rf_read_reg(REG_PAYLOAD_LEN);
-    dbg_puts_hex8("[RF][SPI] restore -> read ", r3);
-
-    wr_ok = (uint8_t)((r1 == 0x5Au) && (r2 == 0xA5u) && (r3 == old_pl));
-    if (!wr_ok)
-    {
-        dbg_puts("[RF][SPI] FAIL: write/readback mismatch!\r\n");
+    if (ok) {
+        dbg_puts("[RF][SPI] ===== SPI SELF TEST PASS =====\r\n");
+    } else {
+        dbg_puts("[RF][SPI] ===== SPI SELF TEST FAIL =====\r\n");
     }
-
-    /* 3) cross-page consistency: read 0x00~0x05 in PAGE0 and PAGE3 */
-    rf_switch_page(PAGE0_SEL);
-    for (i = 0; i < 6u; i++)
-    {
-        p0[i] = rf_read_reg(i);
-    }
-
-    rf_switch_page(PAGE3_SEL);
-    for (i = 0; i < 6u; i++)
-    {
-        p3[i] = rf_read_reg(i);
-    }
-
-    dbg_puts("[RF][SPI] PAGE0 0x00~0x05: ");
-    for (i = 0; i < 6u; i++)
-    {
-        dbg_put_hex8(p0[i]);
-        if (i != 5u) dbg_send_byte(' ');
-    }
-    dbg_puts("\r\n");
-
-    dbg_puts("[RF][SPI] PAGE3 0x00~0x05: ");
-    for (i = 0; i < 6u; i++)
-    {
-        dbg_put_hex8(p3[i]);
-        if (i != 5u) dbg_send_byte(' ');
-    }
-    dbg_puts("\r\n");
-
-    cross_ok = 1u;
-    for (i = 0; i < 6u; i++)
-    {
-        if (p0[i] != p3[i])
-        {
-            cross_ok = 0u;
-            break;
-        }
-    }
-    if (!cross_ok)
-    {
-        dbg_puts("[RF][SPI] FAIL: page-cross mismatch (0x00~0x05)!\r\n");
-    }
-
-    ok = (uint8_t)(wr_ok && cross_ok);
-
-    dbg_puts("[RF][SPI] ===== SPI SELF TEST ");
-    dbg_puts(ok ? "PASS" : "FAIL");
-    dbg_puts(" =====\r\n");
 
     return ok;
+}
+
+
+
+
+/* =====================================================================
+ *  SPI 预检：必须在 rf_init() 之前调用
+ *  - 目的：排除“rf_init 改变状态/页/模式”对 SPI 自检的影响
+ *  - 流程：GPIO/SPI 初始化一次 -> 硬复位 -> 读 REG00/02/04
+ *          -> 翻转 REG04 bit4 写回读 -> 恢复原值
+ *  说明：仅验证 SPI 读写链路是否可靠，不做 RF 配置。
+ * ===================================================================== */
+bool rf_spi_pretest_before_init(void)
+{
+    uint8_t r00, r02, r04, r04_new, r04_rb;
+
+    dbg_puts("[RF][PRE] enter\r\n");
+
+    /* 确保 SPI/GPIO 已初始化，并做一次硬复位，使芯片回到默认 page0 状态 */
+    pan3029_port_init_once();
+    pan3029_port_hw_reset();
+
+    r00 = rf_read_reg(0x00);
+    r02 = rf_read_reg(0x02);
+    r04 = rf_read_reg(0x04);
+
+    dbg_puts("[RF][PRE] REG00=0x"); dbg_put_hex8(r00);
+    dbg_puts(" REG02=0x"); dbg_put_hex8(r02);
+    dbg_puts(" REG04=0x"); dbg_put_hex8(r04);
+    dbg_puts("\r\n");
+
+    /* 快速排除全 0 / 全 FF 这种“线不通/悬空”情况 */
+    if (((r00 == 0x00) && (r02 == 0x00) && (r04 == 0x00)) ||
+        ((r00 == 0xFF) && (r02 == 0xFF) && (r04 == 0xFF)))
+    {
+        dbg_puts("[RF][PRE] FAIL: regs look like all 00/FF\r\n");
+        return false;
+    }
+
+    /* 翻转 REG04 bit4（你 rf_init 日志里也在操作这个位）做写回读验证 */
+    r04_new = (uint8_t)(r04 ^ (1u << 4));
+    rf_write_reg(0x04, r04_new);
+    r04_rb = rf_read_reg(0x04);
+
+    dbg_puts("[RF][PRE] toggle REG04 bit4: write 0x"); dbg_put_hex8(r04_new);
+    dbg_puts(" -> read 0x"); dbg_put_hex8(r04_rb);
+    dbg_puts("\r\n");
+
+    /* 恢复 */
+    rf_write_reg(0x04, r04);
+
+    if (r04_rb != r04_new)
+    {
+        dbg_puts("[RF][PRE] FAIL: write/readback mismatch\r\n");
+        return false;
+    }
+
+    dbg_puts("[RF][PRE] PASS\r\n");
+    return true;
 }
 

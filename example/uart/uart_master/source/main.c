@@ -23,14 +23,34 @@
 #include "dl2807_mac.h"
 #include "pan3029_rf.h"
 
+/*
+ * Switch system clock to 32MHz external high-speed crystal (XTH).
+ * Must be called BEFORE UART init (baud depends on PCLK).
+ */
+static void app_switch_clock_to_32mhz(void)
+{
+    /* Enable XTH (external high-speed crystal) */
+    Clk_Enable(ClkXTH, TRUE);
+    while (FALSE == Clk_GetClkRdy(ClkXTH)) {
+        ;
+    }
+
+    /* Switch system clock source to XTH */
+    Clk_SwitchTo(ClkXTH);
+
+    /* HCLK = PCLK = 32MHz (no div) */
+    Clk_SetHClkDiv(ClkDiv1);
+    Clk_SetPClkDiv(ClkDiv1);
+}
+
+
 /*==================== 身份切换（你只改这里） ====================*/
 #define APP_ROLE_SELECT_COORD   (1u)
 #define APP_ROLE_SELECT_NODE    (2u)
 
 /* 选择身份 */
 #define APP_ROLE_SELECT         (APP_ROLE_SELECT_NODE)
-/* #define APP_ROLE_SELECT      (APP_ROLE_SELECT_COORD) */
-
+//#define APP_ROLE_SELECT      (APP_ROLE_SELECT_COORD) 
 /*==================== 通用配置 ====================*/
 #define DBG_UART_BAUD           (115200u)
 
@@ -185,6 +205,9 @@ int32_t main(void)
     hclk    = 0u;
 
     /* UART1 配置全部放到 dbg 模块中 */
+    /* Switch system clock to 32MHz BEFORE UART init */
+    app_switch_clock_to_32mhz();
+
     dbg_uart_init(DBG_UART_BAUD);
 
     dbg_puts("\r\n\r\n==============================\r\n");

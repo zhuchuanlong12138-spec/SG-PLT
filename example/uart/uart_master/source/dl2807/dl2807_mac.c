@@ -2,10 +2,11 @@
 #include <string.h>
 #include "pan3029_rf.h"
 
-/* 强制引入你工程里的 CRC 实现（解决 implicit + CRC_TYPE_CCITT undefined） */
+/* ?? CRC ?? implicit + CRC_TYPE_CCITT undefined */
 #include "crc.h"
+#include "dbg.h"
 
-/* 兜底：万一被其他同名 crc.h 抢走，也保证能编译 */
+/* ??? crc.h ???? */
 #ifndef CRC_TYPE_CCITT
 #define CRC_TYPE_CCITT   (0u)
 #endif
@@ -14,13 +15,13 @@
 #define CRC_TYPE_IBM     (1u)
 #endif
 
-/* 兜底：防止 prototype 没进来导致 implicit */
+/* ?? prototype ? implicit */
 #ifndef __RADIO_COMPUTE_CRC_PROTO__
 #define __RADIO_COMPUTE_CRC_PROTO__
 uint16_t RadioComputeCRC(uint8_t *buffer, uint8_t length, uint8_t crcType);
 #endif
 
-/* MAC格式：
+/* MAC?
  * [0] type
  * [1] seq
  * [2] pan L
@@ -84,6 +85,13 @@ void dl2807_mac_init(dl2807_mac_ctx_t *ctx,
 
     ctx->last_beacon_sf_id = 0xFFFFFFFFUL;
 
+    dbg_puts("[BOOT] rf_spi_pretest_before_init...\r\n");
+    if (rf_spi_pretest_before_init()) {
+        dbg_puts("[BOOT] SPI PRETEST PASS\r\n");
+    } else {
+        dbg_puts("[BOOT] SPI PRETEST FAIL\r\n");
+    }
+
     rf_init();
 	  rf_spi_self_test();
     dl2807_radio_basic_config();
@@ -113,7 +121,7 @@ bool dl2807_mac_send_status(dl2807_mac_ctx_t *ctx,
     return true;
 }
 
-/* ===== 控制信道 API：都是“排队”，由MAC在控制窗口发送 ===== */
+/* ===== ? API???MAC??? ===== */
 
 static bool dl2807_ctrl_queue(dl2807_mac_ctx_t *ctx,
                               uint8_t ftype,
@@ -125,7 +133,7 @@ static bool dl2807_ctrl_queue(dl2807_mac_ctx_t *ctx,
         return false;
 
     if (ctx->ctrl_tx_req)
-        return false; /* 只排队一帧，避免复杂化 */
+        return false; /* ?????? */
 
     ctx->ctrl_tx_type = ftype;
     ctx->ctrl_tx_dst  = dst;
@@ -142,7 +150,7 @@ bool dl2807_mac_send_ctrl_req(dl2807_mac_ctx_t *ctx,
                               const uint8_t *payload,
                               uint8_t len)
 {
-    /* REQ默认发给 coordinator_id（如果还不知道 coordinator_id，就上层先保证 synced 后再发） */
+    /* REQ?? coordinator_id? coordinator_id??? synced ? */
     uint16_t dst = ctx->coordinator_id ? ctx->coordinator_id : 0xFFFF;
     return dl2807_ctrl_queue(ctx, (uint8_t)DL2807_FTYPE_CTRL_REQ, dst, payload, len);
 }
@@ -165,7 +173,7 @@ bool dl2807_mac_send_ctrl_ack(dl2807_mac_ctx_t *ctx,
 
 void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
 {
-    /* 1) TX完成/超时 */
+    /* 1) TX/? */
     if (ctx->tx_pending)
     {
         int tx_flag = rf_get_transmit_flag();
@@ -184,7 +192,7 @@ void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
         }
     }
 
-    /* 2) RX事件 */
+    /* 2) RX? */
     {
         int rx_flag = rf_get_recv_flag();
 
@@ -208,13 +216,13 @@ void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
         }
     }
 
-    /* 3) 超帧时序 */
+    /* 3) ?? */
     if (ctx->role == DL2807_ROLE_COORDINATOR)
         dl2807_coordinator_superframe_fsm(ctx);
     else
         dl2807_node_superframe_fsm(ctx);
 
-    /* 4) NODE 等RSP超时重试（最小实现） */
+    /* 4) NODE RSP??С?? */
     if (ctx->role == DL2807_ROLE_NODE && ctx->ctrl_wait_rsp)
     {
         if ((int32_t)(ctx->tick_ms - ctx->ctrl_rsp_deadline_ms) >= 0)
@@ -224,8 +232,8 @@ void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
             if (ctx->ctrl_req_retry < DL2807_CTRL_REQ_RETRY_MAX)
             {
                 ctx->ctrl_req_retry++;
-                /* 重新排队REQ（保持payload不变） */
-                /* 注意：如果此时队列已被占用则放弃本轮 */
+                /* ?REQpayload? */
+                /* ????? */
                 (void)dl2807_ctrl_queue(ctx,
                                         (uint8_t)DL2807_FTYPE_CTRL_REQ,
                                         ctx->coordinator_id ? ctx->coordinator_id : 0xFFFF,
@@ -236,7 +244,7 @@ void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
     }
 }
 
-/* ================= RF封装 ================= */
+/* ================= RF? ================= */
 
 static void dl2807_radio_basic_config(void)
 {
@@ -284,7 +292,7 @@ static void dl2807_radio_send(dl2807_mac_ctx_t *ctx, uint8_t *buf, uint8_t len)
     ctx->tx_deadline_ms = ctx->tick_ms + DL2807_TX_TIMEOUT_MS;
 }
 
-/* ================= MAC构造/解析 ================= */
+/* ================= MAC/ ================= */
 
 static uint8_t dl2807_build_frame(dl2807_mac_ctx_t *ctx,
                                   dl2807_frame_type_t type,
@@ -361,7 +369,7 @@ static bool dl2807_parse_frame(const uint8_t *buf,
              ((uint16_t)buf[(uint8_t)(10 + payload_len)] << 8);
 
 		crc_calc = RadioComputeCRC(
-				(uint8_t *)buf,   /* ARMCC5 下 CRC 接口不接受 const，这里安全 */
+				(uint8_t *)buf,   /* ARMCC5  CRC ?? const?? */
 				(uint8_t)(DL2807_MAC_HEADER_LEN + payload_len),
 				CRC_TYPE_CCITT );
 
@@ -374,11 +382,11 @@ static bool dl2807_parse_frame(const uint8_t *buf,
 static void dl2807_handle_rx_frame(dl2807_mac_ctx_t *ctx,
                                    const dl2807_mac_frame_t *frame)
 {
-    /* 1) PAN过滤 */
+    /* 1) PAN */
     if (frame->pan_id != ctx->pan_id)
         return;
 
-    /* 2) NODE: 收到BEACON -> 同步 */
+    /* 2) NODE: ?BEACON -> ? */
     if (ctx->role == DL2807_ROLE_NODE)
     {
         if (frame->type == (uint8_t)DL2807_FTYPE_BEACON)
@@ -388,7 +396,7 @@ static void dl2807_handle_rx_frame(dl2807_mac_ctx_t *ctx,
             ctx->coordinator_id      = frame->src;
         }
 
-        /* NODE: 收到RSP -> 清等待并准备ACK（由上层决定是否回ACK） */
+        /* NODE: ?RSP -> ??ACK??ACK */
         if (frame->type == (uint8_t)DL2807_FTYPE_CTRL_RSP)
         {
             ctx->ctrl_wait_rsp = false;
@@ -396,15 +404,15 @@ static void dl2807_handle_rx_frame(dl2807_mac_ctx_t *ctx,
         }
     }
 
-    /* 3) 目标地址过滤 */
+    /* 3) ?? */
     if (frame->dst != 0xFFFFu && frame->dst != ctx->node_id)
         return;
 
-    /* 4) 回调上层 */
+    /* 4) ?? */
     dl2807_mac_on_frame_indication(ctx, frame);
 }
 
-/* ================= 超帧时序 ================= */
+/* ================= ?? ================= */
 
 static void dl2807_coordinator_superframe_fsm(dl2807_mac_ctx_t *ctx)
 {
@@ -426,12 +434,12 @@ static void dl2807_coordinator_superframe_fsm(dl2807_mac_ctx_t *ctx)
 
     sf_id = ctx->superframe_start_ms / DL2807_SUPERFRAME_PERIOD_MS;
 
-    /* 控制窗口：先发BEACON（每超帧一次），再发控制应答（若有） */
+    /* ???BEACON???Σ??У */
     if (t < DL2807_CTRL_WINDOW_MS)
     {
         dl2807_set_channel(ctx, DL2807_CH_CTRL);
 
-        /* 1) BEACON：每超帧仅发一次 */
+        /* 1) BEACON??? */
         if (ctx->last_beacon_sf_id != sf_id)
         {
             if (!ctx->tx_pending)
@@ -459,7 +467,7 @@ static void dl2807_coordinator_superframe_fsm(dl2807_mac_ctx_t *ctx)
             return;
         }
 
-        /* 2) 控制应答帧：若队列里有RSP/ACK等，且当前不在TX */
+        /* 2) ??RSP/ACK???TX */
         if (ctx->ctrl_tx_req && !ctx->tx_pending)
         {
             uint8_t len = dl2807_build_frame(ctx,
@@ -474,7 +482,7 @@ static void dl2807_coordinator_superframe_fsm(dl2807_mac_ctx_t *ctx)
         return;
     }
 
-    /* 业务窗口：DATA_DOWN（原样保留） */
+    /* ????DATA_DOWN? */
     if (t < (DL2807_CTRL_WINDOW_MS + DL2807_DATA_UP_WINDOW_MS))
     {
         ctx->state = DL2807_STATE_DATA_TX;
@@ -495,7 +503,7 @@ static void dl2807_coordinator_superframe_fsm(dl2807_mac_ctx_t *ctx)
         return;
     }
 
-    /* 其它时间：RX */
+    /* ??RX */
     ctx->state = DL2807_STATE_DATA_RX;
     dl2807_set_channel(ctx, DL2807_CH_DATA);
 }
@@ -508,6 +516,7 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
     {
         ctx->state = DL2807_STATE_WAIT_BEACON;
         dl2807_set_channel(ctx, DL2807_CH_CTRL);
+			  dl2807_radio_enter_rx();   // ★ 关键：持续打开 RX 等 BEACON
         return;
     }
 
@@ -519,12 +528,13 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
         return;
     }
 
-    /* 控制窗口：监听/发送控制REQ/ACK */
+    /* ??/?REQ/ACK */
     if (t < DL2807_CTRL_WINDOW_MS)
     {
         ctx->state = DL2807_STATE_WAIT_BEACON;
         dl2807_set_channel(ctx, DL2807_CH_CTRL);
-
+        dl2807_radio_enter_rx();   // ★ 必加
+			
         if (ctx->ctrl_tx_req && !ctx->tx_pending)
         {
             uint8_t len = dl2807_build_frame(ctx,
@@ -537,7 +547,7 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
             dl2807_radio_send(ctx, ctx->tx_buf, len);
             ctx->ctrl_tx_req = false;
 
-            /* 如果刚发的是REQ，则开始等待RSP */
+            /* ?REQ??RSP */
             if (ctx->ctrl_tx_type == (uint8_t)DL2807_FTYPE_CTRL_REQ)
             {
                 ctx->ctrl_wait_rsp = true;
@@ -547,12 +557,13 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
         return;
     }
 
-    /* 业务窗口：DATA_UP（原样保留） */
+    /* ????DATA_UP? */
     if (t < (DL2807_CTRL_WINDOW_MS + DL2807_DATA_UP_WINDOW_MS))
     {
         ctx->state = DL2807_STATE_DATA_TX;
         dl2807_set_channel(ctx, DL2807_CH_DATA);
-
+        dl2807_radio_enter_rx();   // ★ 必加
+			
         if (ctx->app_tx_req && !ctx->tx_pending)
         {
             uint8_t len = dl2807_build_frame(ctx,

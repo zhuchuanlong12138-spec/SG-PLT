@@ -383,4 +383,10 @@ void rf_set_recv_flag(int status);
 int rf_get_transmit_flag(void);
 void rf_set_transmit_flag(int status);
 
+
+/* 在 rf_init() 之前调用的 SPI 读写预检（不改变 RF 配置，仅做寄存器读写验证） */
+bool rf_spi_pretest_before_init(void);
+
+
+uint8_t rf_spi_self_test(void);
 #endif

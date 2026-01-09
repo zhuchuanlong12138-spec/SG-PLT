@@ -2,18 +2,18 @@
  * @file    pan3029_port.h
  * @brief   PAN3029 porting layer for HC32L110C6PA (Keil/armcc v5)
  *
- * 硬件连线（已确认）：
+ * ????
  *   PAN3029 SCK        -> HC32 P15
  *   PAN3029 MOSI       -> HC32 P14
  *   PAN3029 MISO       -> HC32 P23
  *   PAN3029 CS         -> HC32 P24
  *   PAN3029 IRQ        -> HC32 P25
  *   PAN3029 NRST       -> HC32 P26
- *   PAN3029 GPIO11(CAD)-> HC32 P27   (GPIO11 复用输出 CAD)
+ *   PAN3029 GPIO11(CAD)-> HC32 P27   (GPIO11  CAD)
  *
- * 说明：
- *  - 你的硬件没有外置天线开关(TX/RX)与 TCXO_EN，引脚相关接口在本 port 层做空实现。
- *  - 为了避免循环 include：本文件不再包含 pan3029_rf.h。
+ * ?
+ *  - ???(TX/RX) TCXO_EN??? port ??
+ *  - ??? include?? pan3029_rf.h
  *******************************************************************************/
 #ifndef __PAN3029_PORT_H_
 #define __PAN3029_PORT_H_
@@ -21,13 +21,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* HC32 底层驱动 */
+/* HC32 ? */
 #include "gpio.h"
 #include "spi.h"
 #include "interrupts_hc32l110.h"
 #include "delay.h"
 
-/* 板级引脚定义（IRQ/CAD/CS/RST） */
+/* 弶?壨IRQ/CAD/CS/RST */
 #include "board_pins.h"
 
 #ifdef __cplusplus
@@ -35,8 +35,8 @@ extern "C" {
 #endif
 
 /*==============================
- *  HC32 引脚映射（Pxy => Port=x Pin=y）
- *  - SPI 三线通常由 SPI 外设接管；CS/RST/IRQ/CAD 由 GPIO 控制/读取
+ *  HC32 ??Pxy => Port=x Pin=y
+ *  - SPI ? SPI ??CS/RST/IRQ/CAD  GPIO /?
  *==============================*/
 #ifndef PAN3029_CS_PORT
 #define PAN3029_CS_PORT       (PAN3029_PIN_CS_PORT)
@@ -66,13 +66,13 @@ extern "C" {
 #define PAN3029_CAD_PIN       (PAN3029_PIN_CAD_PIN)
 #endif
 
-/* IRQ 触发方式：默认上升沿；如发现电平相反/不进中断，可改为 Falling */
+/* IRQ ???緢???/ж??? Falling */
 #ifndef PAN3029_IRQ_TRIG
 #define PAN3029_IRQ_TRIG      (GpioIrqRising)
 #endif
 
 /*==============================
- *  rf_port 接口（Panchip 驱动要求）
+ *  rf_port ??Panchip ?
  *==============================*/
 typedef struct
 {
@@ -92,8 +92,13 @@ typedef struct
 extern rf_port_t rf_port;
 
 /*==============================
- *  对外函数声明
+ *  ?
  *==============================*/
+
+/* 供 rf_init 之前做 SPI 预检：仅做一次 GPIO/SPI 初始化 + 硬件复位 */
+void pan3029_port_init_once(void);
+void pan3029_port_hw_reset(void);
+
 uint8_t spi_readwritebyte(uint8_t tx_data);
 void    spi_cs_set_high(void);
 void    spi_cs_set_low(void);
