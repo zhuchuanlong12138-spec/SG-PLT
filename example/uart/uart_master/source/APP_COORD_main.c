@@ -25,7 +25,7 @@ extern volatile uint32_t g_ms;
 
 /* =================== RF 参数（两块板必须一致） =================== */
 #ifndef APP_RF_FREQ_HZ
-#define APP_RF_FREQ_HZ        (470000000UL)
+#define APP_RF_FREQ_HZ        (433000000UL)
 #endif
 #ifndef APP_RF_BW
 #define APP_RF_BW             (BW_125K)
@@ -97,6 +97,8 @@ static void coord_send_counter(uint32_t v)
     uint8_t pkt[COORD_PKT_MAX_LEN];
     uint8_t len = 0u;
     int txf;
+    uint32_t tx_time_us = 0u;
+    RF_Err_t ret;
 
     if (s_rf_ready == 0u)
     {
@@ -125,16 +127,27 @@ static void coord_send_counter(uint32_t v)
     /* 清一次 IRQ，避免历史中断影响状态机 */
     (void)rf_clr_irq(0xFFu);
 
-    /* 强制置为 IDLE，再发 */
+    /* 强制提醒：本工程“COORD 只发第一包”的根因通常是：TX_DONE 里关了 PA/LDO，
+     * 但发送时没重新打开。
+     * 因此这里必须使用 rf_single_tx_data()（它会：STB3 -> LDO/PA ON -> set_tx() -> TX_SINGLE -> send）。
+     * 不要直接调用 rf_send_packet()（它只写 FIFO + 进入 TX，不会打开 PA/LDO，也不会切天线/开关）。
+     */
     (void)rf_set_transmit_flag(RADIO_FLAG_IDLE);
-
-    /* 发送 */
-    (void)rf_send_packet(pkt, (int)len);
+    ret = rf_single_tx_data(pkt, len, &tx_time_us);
+    if (ret != OK && ret != RF_OK)
+    {
+        dbg_puts("[COORD][TX] send FAIL, ret=");
+        dbg_put_u32((uint32_t)ret);
+        dbg_puts("\r\n");
+        return;
+    }
 
     dbg_puts("[COORD][TX] CNT=");
     dbg_put_u32(v);
     dbg_puts(" len=");
     dbg_put_u32((uint32_t)len);
+    dbg_puts(" tx_us=");
+    dbg_put_u32(tx_time_us);
     dbg_puts("\r\n");
 }
 
@@ -164,8 +177,13 @@ static RF_Err_t coord_rf_setup(void)
         return RF_FAIL;
     }
 
-    /* 默认参数（库函数内部会写很多寄存器） */
-  //  (void)rf_set_default_para();
+    /*
+     * 默认参数（强烈建议两端都调用）
+     * 说明：库内部会一次性配置大量寄存器（调制、滤波、前导、FIFO、IRQ 映射等）。
+     *      你只手动设置 freq/bw/sf/sync/crc/txpwr 并不一定覆盖所有关键项。
+     *      先跑通阶段，COORD/NODE 都调用它，能最大程度避免“隐藏参数不一致”。
+     */
+   // (void)rf_set_default_para();
 
     /* 关键参数（必须两端一致） */
     (void)rf_set_freq(APP_RF_FREQ_HZ);

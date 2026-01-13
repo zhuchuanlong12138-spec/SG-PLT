@@ -19,10 +19,11 @@
 #include "pan3029_rf.h"
 
 extern volatile uint32_t g_ms;
+extern struct RxDoneMsg RxDoneParams;
 
 /* =================== RF 参数（两块板必须一致） =================== */
 #ifndef APP_RF_FREQ_HZ
-#define APP_RF_FREQ_HZ        (470000000UL)
+#define APP_RF_FREQ_HZ        (433000000UL)
 #endif
 #ifndef APP_RF_BW
 #define APP_RF_BW             (BW_125K)
@@ -82,33 +83,50 @@ static void node_enter_rx_continuous(void)
     dbg_puts("[NODE][RF] enter RX continuous\r\n");
 }
 
+/* 在不引入 printf/浮点的前提下打印有符号 8 位数 */
+static void node_put_i8(int8_t v)
+{
+    if (v < 0)
+    {
+        dbg_puts("-");
+        dbg_put_u32((uint32_t)(-v));
+    }
+    else
+    {
+        dbg_put_u32((uint32_t)v);
+    }
+}
+
 static void node_handle_radio_events(void)
 {
     int rxf = rf_get_recv_flag();
 
     if (rxf == RADIO_FLAG_RXDONE)
     {
-        uint8_t rx[128];
-        uint8_t n;
-
         (void)rf_set_recv_flag(RADIO_FLAG_IDLE);
-
-        n = rf_recv_packet(rx);
+        /*
+         * 注意：rf_irq_process() 在检测到 REG_IRQ_RX_DONE 后，
+         * 已经把 FIFO 的 payload 读到全局 RxDoneParams.Payload，
+         * 并把长度/RS SI/SNR 存到 RxDoneParams 里。
+         * 这里不要再调用 rf_recv_packet()，否则会把 FIFO 读空/读错。
+         */
 
         dbg_puts("[NODE][RX] len=");
-        dbg_put_u32((uint32_t)n);
+        dbg_put_u32((uint32_t)RxDoneParams.Size);
+        dbg_puts(" rssi=");
+        node_put_i8((int8_t)RxDoneParams.Rssi);
         dbg_puts(" data=");
-        dbg_hexdump(rx, n);
+        dbg_hexdump(RxDoneParams.Payload, (uint32_t)RxDoneParams.Size);
         dbg_puts("\r\n");
 
         /* 解析 CNT 帧 */
-        if (n >= 7u && rx[0] == 'C' && rx[1] == 'N' && rx[2] == 'T')
+        if (RxDoneParams.Size >= 7u && RxDoneParams.Payload[0] == 'C' && RxDoneParams.Payload[1] == 'N' && RxDoneParams.Payload[2] == 'T')
         {
             uint32_t v = 0u;
-            v |= (uint32_t)rx[3];
-            v |= ((uint32_t)rx[4] << 8);
-            v |= ((uint32_t)rx[5] << 16);
-            v |= ((uint32_t)rx[6] << 24);
+            v |= (uint32_t)RxDoneParams.Payload[3];
+            v |= ((uint32_t)RxDoneParams.Payload[4] << 8);
+            v |= ((uint32_t)RxDoneParams.Payload[5] << 16);
+            v |= ((uint32_t)RxDoneParams.Payload[6] << 24);
 
             dbg_puts("[NODE] CNT=");
             dbg_put_u32(v);
@@ -145,6 +163,10 @@ static RF_Err_t node_rf_setup(void)
         return RF_FAIL;
     }
 
+    /*
+     * 默认参数（强烈建议两端都调用）
+     * 说明：库内部会写入一组推荐寄存器，避免出现“隐藏配置不一致”。
+     */
     //(void)rf_set_default_para();
 
     (void)rf_set_freq(APP_RF_FREQ_HZ);
