@@ -31,7 +31,7 @@ extern "C" {
 
 #define DL2807_TX_TIMEOUT_MS           300U
 
-/* ¿ØÖÆÐÅµÀµÈ´ý/ÖØÊÔ²ÎÊý£¨×îÐ¡ÊµÏÖ£ºÓÃÓÚ´òÓ¡Óë¼òµ¥³¬Ê±ÅÐ¶¨£© */
+/* ÅµÈ´/Ô²Ð¡ÊµÖ£Ú´Ó¡òµ¥³Ê±Ð¶ */
 #define DL2807_CTRL_WAIT_RSP_MS        110U
 #define DL2807_CTRL_REQ_RETRY_MAX      2U
 
@@ -56,12 +56,12 @@ typedef enum
     DL2807_FTYPE_DATA_UP      = 0x10,
     DL2807_FTYPE_DATA_DOWN    = 0x11,
 
-    /* ===== ¿ØÖÆÐÅµÀ×îÐ¡±Õ»·£ºREQ/RSP/ACK ===== */
+    /* ===== ÅµÐ¡Õ»REQ/RSP/ACK ===== */
     DL2807_FTYPE_CTRL_REQ     = 0x30,
     DL2807_FTYPE_CTRL_RSP     = 0x31,
     DL2807_FTYPE_CTRL_ACK     = 0x32,
 
-    /* ±£Áô */
+    /*  */
     DL2807_FTYPE_ACK          = 0x20,
 } dl2807_frame_type_t;
 
@@ -112,24 +112,24 @@ typedef struct
     bool     rx_pending;
     uint8_t  rx_len;
 
-    /* ÒµÎñ£ºDATA_UP/DOWN */
+    /* ÒµDATA_UP/DOWN */
     bool     app_tx_req;
     uint8_t  app_tx_len;
     uint8_t  app_tx_payload[DL2807_MAC_MAX_PAYLOAD_LEN];
 
-    /* ===== ¿ØÖÆÐÅµÀ¶ÓÁÐ£¨REQ/RSP/ACK£©===== */
+    /* ===== ÅµÐ£REQ/RSP/ACK===== */
     bool     ctrl_tx_req;
     uint8_t  ctrl_tx_len;
     uint8_t  ctrl_tx_payload[DL2807_MAC_MAX_PAYLOAD_LEN];
     uint16_t ctrl_tx_dst;
     uint8_t  ctrl_tx_type; /* DL2807_FTYPE_CTRL_REQ/RSP/ACK */
 
-    /* NODE: µÈ´ýRSP */
+    /* NODE: È´RSP */
     bool     ctrl_wait_rsp;
     uint32_t ctrl_rsp_deadline_ms;
     uint8_t  ctrl_req_retry;
 
-    /* COORD: beacon·¢ËÍÈ¥ÖØ */
+    /* COORD: beaconÈ¥ */
     uint32_t last_beacon_sf_id;
 } dl2807_mac_ctx_t;
 
@@ -143,25 +143,25 @@ void dl2807_mac_1ms_tick(dl2807_mac_ctx_t *ctx);
 
 void dl2807_mac_task(dl2807_mac_ctx_t *ctx);
 
-/* ÒµÎñÉÏ±¨£¨Ô­ÓÐ£© */
+/* ÒµÏ±Ô­Ð£ */
 bool dl2807_mac_send_status(dl2807_mac_ctx_t *ctx,
                             const uint8_t *payload,
                             uint8_t len);
 
-/* ===== ¿ØÖÆÐÅµÀ×îÐ¡±Õ»· API ===== */
+/* ===== ÅµÐ¡Õ» API ===== */
 
-/* NODE£º·¢REQ£¨Ä¿±êÄ¬ÈÏ coordinator_id£»Èô»¹Î´Öª¿É´« dst=0xFFFF ÓÉÉÏ²ã×Ô¼ºÌî£© */
+/* NODEREQÄ¿Ä¬ coordinator_idÎ´ÖªÉ´ dst=0xFFFF Ï²Ô¼î£© */
 bool dl2807_mac_send_ctrl_req(dl2807_mac_ctx_t *ctx,
                               const uint8_t *payload,
                               uint8_t len);
 
-/* COORD£º»ØRSP ¸øÄ³¸ö½Úµã */
+/* COORDRSP Ä³Úµ */
 bool dl2807_mac_send_ctrl_rsp(dl2807_mac_ctx_t *ctx,
                               uint16_t dst,
                               const uint8_t *payload,
                               uint8_t len);
 
-/* NODE£º»ØACK ¸ø COORD£¨Ò»°ãÊÕµ½RSPºóµ÷ÓÃ£© */
+/* NODEACK  COORDÒ»ÕµRSPÃ£ */
 bool dl2807_mac_send_ctrl_ack(dl2807_mac_ctx_t *ctx,
                               uint16_t dst,
                               const uint8_t *payload,

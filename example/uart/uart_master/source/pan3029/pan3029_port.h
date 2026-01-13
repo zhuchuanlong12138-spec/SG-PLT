@@ -27,7 +27,7 @@
 #include "interrupts_hc32l110.h"
 #include "delay.h"
 
-/* ‰?‰ÍIRQ/CAD/CS/RST */
+/* å¼¶?å£¨IRQ/CAD/CS/RST */
 #include "board_pins.h"
 
 #ifdef __cplusplus
@@ -66,7 +66,7 @@ extern "C" {
 #define PAN3029_CAD_PIN       (PAN3029_PIN_CAD_PIN)
 #endif
 
-/* IRQ ???¾ˆ???/§Ø??? Falling */
+/* IRQ ???ç·¢???/Ğ¶??? Falling */
 #ifndef PAN3029_IRQ_TRIG
 #define PAN3029_IRQ_TRIG      (GpioIrqRising)
 #endif
@@ -95,7 +95,7 @@ extern rf_port_t rf_port;
  *  ?
  *==============================*/
 
-/* ¹© rf_init Ö®Ç°×ö SPI Ô¤¼ì£º½ö×öÒ»´Î GPIO/SPI ³õÊ¼»¯ + Ó²¼ş¸´Î» */
+/* ä¾› rf_init ä¹‹å‰åš SPI é¢„æ£€ï¼šä»…åšä¸€æ¬¡ GPIO/SPI åˆå§‹åŒ– + ç¡¬ä»¶å¤ä½ */
 void pan3029_port_init_once(void);
 void pan3029_port_hw_reset(void);
 

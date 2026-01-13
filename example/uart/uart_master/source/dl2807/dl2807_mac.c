@@ -1,6 +1,7 @@
 #include "dl2807_mac.h"
 #include <string.h>
 #include "pan3029_rf.h"
+#include "pan3029_port.h"
 
 /* ?? CRC ?? implicit + CRC_TYPE_CCITT undefined */
 #include "crc.h"
@@ -43,6 +44,7 @@ static void dl2807_radio_basic_config(void);
 static void dl2807_set_channel(dl2807_mac_ctx_t *ctx, dl2807_channel_t ch);
 static void dl2807_radio_enter_rx(void);
 static void dl2807_radio_send(dl2807_mac_ctx_t *ctx, uint8_t *buf, uint8_t len);
+static void dl2807_force_rx_baseline(dl2807_mac_ctx_t *ctx);
 
 static uint8_t dl2807_build_frame(dl2807_mac_ctx_t *ctx,
                                   dl2807_frame_type_t type,
@@ -97,6 +99,13 @@ void dl2807_mac_init(dl2807_mac_ctx_t *ctx,
     dl2807_radio_basic_config();
     dl2807_set_channel(ctx, DL2807_CH_CTRL);
     dl2807_radio_enter_rx();
+
+    /* DEBUG: force baseline RX on NODE (do not rely on superframe FSM yet) */
+    if (ctx->role == DL2807_ROLE_NODE)
+    {
+        dbg_puts("[DBG] FORCE RX BASELINE CONFIG\r\n");
+        dl2807_force_rx_baseline(ctx);
+    }
 }
 
 void dl2807_mac_1ms_tick(dl2807_mac_ctx_t *ctx)
@@ -222,7 +231,7 @@ void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
     else
         dl2807_node_superframe_fsm(ctx);
 
-    /* 4) NODE RSP??С?? */
+    /* 4) NODE RSP???? */
     if (ctx->role == DL2807_ROLE_NODE && ctx->ctrl_wait_rsp)
     {
         if ((int32_t)(ctx->tick_ms - ctx->ctrl_rsp_deadline_ms) >= 0)
@@ -242,6 +251,13 @@ void dl2807_mac_task(dl2807_mac_ctx_t *ctx)
             }
         }
     }
+
+/* FORCE_RX_WATCHDOG: keep NODE in baseline RX when not synced */
+if (ctx->role == DL2807_ROLE_NODE && !ctx->synced)
+{
+    dl2807_force_rx_baseline(ctx);
+}
+
 }
 
 /* ================= RF? ================= */
@@ -270,6 +286,28 @@ static void dl2807_set_channel(dl2807_mac_ctx_t *ctx, dl2807_channel_t ch)
         rf_set_freq(DL2807_DATA_FREQ_HZ);
 
     ctx->current_ch = ch;
+}
+
+
+/* ===== DEBUG: force RX baseline (CTRL freq + fixed PHY + continuous RX) ===== */
+static void dl2807_force_rx_baseline(dl2807_mac_ctx_t *ctx)
+{
+    /* Keep RF in a known RX state on CTRL channel */
+    (void)ctx;
+
+    rf_set_mode(RF_MODE_STB3);
+    rf_set_freq(DL2807_CTRL_FREQ_HZ);
+
+    rf_set_bw(DL2807_PHY_BW);
+    rf_set_sf(DL2807_PHY_SF);
+    rf_set_code_rate(DL2807_PHY_CR);
+    rf_set_crc(CRC_ON);
+    rf_set_preamble(DL2807_PHY_PREAMBLE);
+    rf_set_syncword(DL2807_PHY_SYNCWORD);
+    rf_set_dcdc_mode(DCDC_ON);
+
+    rf_set_rx_mode(RF_RX_CONTINOUS);
+    rf_set_mode(RF_MODE_RX);
 }
 
 static void dl2807_radio_enter_rx(void)
@@ -434,7 +472,7 @@ static void dl2807_coordinator_superframe_fsm(dl2807_mac_ctx_t *ctx)
 
     sf_id = ctx->superframe_start_ms / DL2807_SUPERFRAME_PERIOD_MS;
 
-    /* ???BEACON???Σ??У */
+    /* ???BEACON????? */
     if (t < DL2807_CTRL_WINDOW_MS)
     {
         dl2807_set_channel(ctx, DL2807_CH_CTRL);
@@ -516,7 +554,7 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
     {
         ctx->state = DL2807_STATE_WAIT_BEACON;
         dl2807_set_channel(ctx, DL2807_CH_CTRL);
-			  dl2807_radio_enter_rx();   // ★ 关键：持续打开 RX 等 BEACON
+			  dl2807_radio_enter_rx();   //  丶 RX  BEACON
         return;
     }
 
@@ -533,7 +571,7 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
     {
         ctx->state = DL2807_STATE_WAIT_BEACON;
         dl2807_set_channel(ctx, DL2807_CH_CTRL);
-        dl2807_radio_enter_rx();   // ★ 必加
+        dl2807_radio_enter_rx();   //  丶
 			
         if (ctx->ctrl_tx_req && !ctx->tx_pending)
         {
@@ -562,7 +600,7 @@ static void dl2807_node_superframe_fsm(dl2807_mac_ctx_t *ctx)
     {
         ctx->state = DL2807_STATE_DATA_TX;
         dl2807_set_channel(ctx, DL2807_CH_DATA);
-        dl2807_radio_enter_rx();   // ★ 必加
+        dl2807_radio_enter_rx();   //  丶
 			
         if (ctx->app_tx_req && !ctx->tx_pending)
         {

@@ -9,26 +9,111 @@
 #include "pan3029_port.h"
 #include "pan3029_param.h"
 #include "radio.h"
-#include <math.h>
-#include "ddl.h"
-#include "clk.h"
-#include "gpio.h"
-#include "uart.h"
-#include "bt.h"
-#include "delay.h"
-#include <stdio.h>
+#include "dbg.h"
+/* --- SPI读写回读验证打印工具 --- */
+
+static void rf_dbg_print_kv_u8(const char *k, uint8_t v)
+{
+    dbg_puts(k);
+    dbg_put_hex8(v);
+}
+
+static RF_Err_t rf_dbg_wr_rd_reg(uint8_t addr, uint8_t wval, uint16_t delay_us)
+{
+    uint8_t rval;
+    uint8_t ret;
+
+    dbg_puts("[RF][SPI] REG ");
+    dbg_put_hex8(addr);
+    dbg_puts("  WR=");
+    dbg_put_hex8(wval);
+
+    ret = rf_write_reg(addr, wval);
+
+    if (delay_us) rf_port.delayus(delay_us);
+
+    rval = rf_read_reg(addr);
+    dbg_puts("  RD=");
+    dbg_put_hex8(rval);
+
+    if (ret != OK)
+    {
+        dbg_puts("  (WR_FAIL)\r\n");
+        return FAIL;
+    }
+
+    if (rval == wval)
+    {
+        dbg_puts("  OK\r\n");
+        return OK;
+    }
+    else
+    {
+        dbg_puts("  MISMATCH\r\n");
+        return FAIL;
+    }
+}
+
+static RF_Err_t rf_dbg_wr_rd_spec(enum PAGE_SEL page, uint8_t addr, uint8_t wval, uint16_t delay_us)
+{
+    uint8_t rval;
+    RF_Err_t ret;
+
+    dbg_puts("[RF][SPI] PAGE=");
+    dbg_put_hex8((uint8_t)page);
+    dbg_puts(" REG ");
+    dbg_put_hex8(addr);
+    dbg_puts("  WR=");
+    dbg_put_hex8(wval);
+
+    ret = rf_write_spec_page_reg(page, addr, wval);
+
+    if (delay_us) rf_port.delayus(delay_us);
+
+    rval = rf_read_spec_page_reg(page, addr);
+    dbg_puts("  RD=");
+    dbg_put_hex8(rval);
+
+    if (ret != OK)
+    {
+        dbg_puts("  (WR_FAIL)\r\n");
+        return FAIL;
+    }
+
+    if (rval == wval)
+    {
+        dbg_puts("  OK\r\n");
+        return OK;
+    }
+    else
+    {
+        dbg_puts("  MISMATCH\r\n");
+        return FAIL;
+    }
+}
+/* ===== C90 compatibility helpers (ARMCC5) ===== */
+static float rf_ceil(float x)
+{
+    int i = (int)x;
+    return (x > (float)i) ? (float)(i + 1) : (float)i;
+}
+
+/* Rough log10 approximation for debug calculations (avoids <math.h> dependency) */
+static float rf_log10(float x)
+{
+    float y = 0.0f;
+    if (x <= 0.0f) return -1000.0f;
+    while (x >= 10.0f) { x /= 10.0f; y += 1.0f; }
+    while (x < 1.0f)   { x *= 10.0f; y -= 1.0f; }
+    return y;
+}
+
+
 
 #define USE_MODEM_CHIRPlOT
 //#define USE_MODEM_LORA
 
-/* debug helpers implemented in main.c */
-extern void dbg_puts(const char *s);
-extern void dbg_put_hex8(uint8_t v);
-extern void dbg_put_hex16(uint16_t v);
-extern void dbg_put_u32(uint32_t v);
-extern void dbg_send_byte(uint8_t b);
-
-/* 
+/*
  * flag that indicate if a new packet is received.
 */
 static int packet_received = RADIO_FLAG_IDLE;
@@ -37,22 +122,6 @@ static int packet_received = RADIO_FLAG_IDLE;
  * flag that indicate if transmision is finished.
 */
 static int packet_transmit = RADIO_FLAG_IDLE;
-
-/* --- SPI Access (datasheet 9.1) -------------------------------------------
- * Address Byte = addr[6:0] + wr[0]
- *   wr = 1 : write
- *   wr = 0 : read
- * i.e.
- *   cmd_read  = (addr << 1) | 0
- *   cmd_write = (addr << 1) | 1
- * -------------------------------------------------------------------------- */
-static uint8_t spi_xfer(uint8_t v)
-{
-    return rf_port.spi_readwrite(v);
-}
-
-static uint8_t pan_cmd_read(uint8_t addr)  { return (uint8_t)((addr << 1) | 0u); }
-static uint8_t pan_cmd_write(uint8_t addr) { return (uint8_t)((addr << 1) | 1u); }
 
 struct RxDoneMsg RxDoneParams;
 
@@ -119,27 +188,16 @@ static uint8_t __ctz(uint8_t val)
  * @param[in] <addr> register address to write
  * @return value read from register
  */
-//uint8_t rf_read_reg(uint8_t addr)
-//{
-//    uint8_t temreg;
-
-//    rf_port.spi_cs_low();
-//    rf_port.spi_readwrite(0x00 | (addr << 1));
-//    temreg = rf_port.spi_readwrite(0x00);
-//    rf_port.spi_cs_high();
-
-//    return temreg;
-//}
 uint8_t rf_read_reg(uint8_t addr)
 {
-    uint8_t val;
+    uint8_t temreg;
 
     rf_port.spi_cs_low();
-    (void)spi_xfer(pan_cmd_read(addr));
-    val = spi_xfer(0x00u);
+    rf_port.spi_readwrite(0x00 | (addr << 1));
+    temreg = rf_port.spi_readwrite(0x00);
     rf_port.spi_cs_high();
 
-    return val;
+    return temreg;
 }
 
 /**
@@ -148,38 +206,22 @@ uint8_t rf_read_reg(uint8_t addr)
  * @param[in] <value> address value to write to rgister
  * @return result
  */
-//uint8_t rf_write_reg(uint8_t addr, uint8_t value)
-//{
-//    uint8_t addr_w = (0x01 | (addr << 1));
-
-//    rf_port.spi_cs_low();
-//    rf_port.spi_readwrite(addr_w);
-//    rf_port.spi_readwrite(value);
-//    rf_port.spi_cs_high();
-//    
-//#if SPI_WRITE_CHECK
-//    if (rf_read_reg(addr) != value)
-//    {
-//        return FAIL;
-//    }
-//#endif
-//    
-//    return OK;
-//}
 uint8_t rf_write_reg(uint8_t addr, uint8_t value)
 {
-    rf_port.spi_cs_low();
-    (void)spi_xfer(pan_cmd_write(addr));
-    (void)spi_xfer(value);
-    rf_port.spi_cs_high();
+    uint8_t addr_w = (0x01 | (addr << 1));
 
+    rf_port.spi_cs_low();
+    rf_port.spi_readwrite(addr_w);
+    rf_port.spi_readwrite(value);
+    rf_port.spi_cs_high();
+    
 #if SPI_WRITE_CHECK
     if (rf_read_reg(addr) != value)
     {
         return FAIL;
     }
 #endif
-
+    
     return OK;
 }
 
@@ -556,8 +598,7 @@ RF_Err_t rf_ft_calibr(void)
 RF_Err_t rf_reg_cfg(void)
 {
     int i;
-
-    for (i = 0; i < (int)(sizeof(g_reg_cfg) / sizeof(pan_reg_cfg_t)); i++)
+    for(i = 0; i < sizeof(g_reg_cfg)/sizeof(pan_reg_cfg_t); i++)
     {
         RF_ASSERT(rf_write_spec_page_reg(g_reg_cfg[i].page, g_reg_cfg[i].addr, g_reg_cfg[i].value));
     }
@@ -631,6 +672,13 @@ RF_Err_t rf_init(void)
     uint8_t rstreg, porreg;
 
     dbg_puts("[RF] rf_init enter\r\n");
+
+    /* Ensure SPI/GPIO and RST are ready BEFORE any register access.
+     * Some apps may call rf_init() before any rf_port init hook.
+     * antenna_init() in pan3029_port performs one-time GPIO/SPI init + HW reset.
+     */
+    dbg_puts("[RF] 0 hw init/reset (antenna_init)\r\n");
+    rf_port.antenna_init();
 
     dbg_puts("[RF] 1 read 0x04\r\n");
     porreg = rf_read_reg(0x04);
@@ -707,8 +755,6 @@ RF_Err_t rf_init(void)
 		
     return OK;
 }
-
-
 /**
  * @brief change rf mode from sleep to standby3(STB3)
  * @param[in] <none>
@@ -842,14 +888,14 @@ RF_Err_t rf_set_lo_freq(uint32_t lo)
  */
 RF_Err_t rf_set_freq(uint32_t freq)
 {
+    int i;
     uint8_t lowband_sel = 0; // 400M 800M is same value?
+    uint8_t temp_fx[3];
+    uint8_t temp_freq[4];
     float tmp_var;
     int integer_part;
     float fractional_part;
     int fb, fc;
-    int i;
-    uint8_t temp_fx[3];
-    uint8_t temp_freq[4];
 
     if(freq < freq_405000000 || freq > freq_1080000000)
     {
@@ -865,7 +911,7 @@ RF_Err_t rf_set_freq(uint32_t freq)
         RF_ASSERT(rf_write_spec_page_regs(PAGE2_SEL, 0x0A, (uint8_t *)reg_agc_freq800, 40));
     }
 
-    for (i = 0; i < 16; i++)
+    for(i = 0; i < 16; i++)
     {
         if(freq == freq_405000000 || freq == freq_810000000)
         {
@@ -894,14 +940,19 @@ RF_Err_t rf_set_freq(uint32_t freq)
     fractional_part = tmp_var - integer_part; // keep the fractional part
 
     fb = integer_part - 20;
-    fc = (int)(fractional_part * 1600 / (2 * (1 + lowband_sel)));    temp_fx[0] = (uint8_t)(fb & 0xFF);
+    fc = (int)(fractional_part * 1600 / (2 * (1 + lowband_sel)));
+
+    temp_fx[0] = (uint8_t)(fb & 0xFF);
     temp_fx[1] = (uint8_t)(fc & 0xFF);
     temp_fx[2] = (uint8_t)((fc >> 8) & 0x0F);
-    RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x15, temp_fx, 3));    temp_freq[0] = (uint8_t)(freq & 0xFF);
+    RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x15, temp_fx, 3));
+
+    temp_freq[0] = (uint8_t)(freq & 0xFF);
     temp_freq[1] = (uint8_t)((freq >> 8) & 0xFF);
     temp_freq[2] = (uint8_t)((freq >> 16) & 0xFF);
     temp_freq[3] = (uint8_t)((freq >> 24) & 0xFF);
     RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x09, temp_freq, 4));
+
     return OK;
 }
 
@@ -933,29 +984,31 @@ uint32_t rf_get_tx_time(uint8_t size)
     uint8_t bw = rf_get_bw();
     uint8_t ldr = rf_get_ldr();
     uint32_t preamble = rf_get_preamble();
-    const float bw_table[4] = {62.5f, 125.0f, 250.0f, 500.0f};
-    float symbol_len;      /* symbol length: ms */
-    float preamble_time;   /* preamble time: ms */
-    float payload_time = 0;/* payload time: ms */
-    float total_time;      /* total time: ms */
+
+    const float bw_table[4] = {62.5, 125, 250, 500};
+
+    float symbol_len; /* symbol length */
+    float preamble_time; /* preamble time: ms */
+    float payload_time; /* payload time: ms */
+    float total_time;   /* total time: ms */
 
     if (bw < BW_62_5K || bw > BW_500K)
     {
         return 0;
     }
 
-
-    symbol_len = (float)(1UL << sf) / bw_table[bw - BW_62_5K]; /* ms */
+    symbol_len = (float)(1 << sf) / bw_table[bw - BW_62_5K]; // symbol length
+    payload_time = 0;
 
     if (sf < 7)
     {
         preamble_time = (preamble + 6.25f) * symbol_len;
-        payload_time = ceil((float)(size * 8 - sf * 4 + 36) / ((sf - ldr * 2) * 4));
+        payload_time = rf_ceil((float)(size * 8 - sf * 4 + 36) / ((sf - ldr * 2) * 4));
     }
     else
     {
         preamble_time = (preamble + 4.25f) * symbol_len;
-        payload_time = ceil((float)(size * 8 - sf * 4 + 44) / ((sf - ldr * 2) * 4));
+        payload_time = rf_ceil((float)(size * 8 - sf * 4 + 44) / ((sf - ldr * 2) * 4));
     }
 
     payload_time = payload_time * (cr + 4);
@@ -1212,7 +1265,6 @@ RF_Err_t rf_set_modem_mode(uint8_t modem_mode)
 RF_Err_t rf_set_rx_single_timeout(uint16_t timeout)
 {
     uint8_t temp[2];
-
     temp[0] = (uint8_t)(timeout & 0xFF);
     temp[1] = (uint8_t)((timeout >> 8) & 0xFF);
     RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x07, temp, 2));
@@ -1246,7 +1298,7 @@ float rf_get_snr(void)
         noise_pow_val = 1;
     }
 
-    snr_val = (float)(10 * log10((sig_pow_val / (2 << sf_val)) / noise_pow_val));
+    snr_val = (float)(10 * rf_log10((sig_pow_val / (2 << sf_val)) / noise_pow_val));
 
     return snr_val;
 }
@@ -1455,7 +1507,6 @@ uint8_t rf_get_tx_power(void)
 RF_Err_t rf_set_preamble(uint16_t preamble)
 {
     uint8_t temp[2];
-
     temp[0] = (uint8_t)(preamble & 0xFF);
     temp[1] = (uint8_t)((preamble >> 8) & 0xFF);
     RF_ASSERT(rf_write_spec_page_regs(PAGE3_SEL, 0x13, temp, 2));
@@ -1814,17 +1865,18 @@ int calculate_chirp_count(int sf_range[], int size, int chirp_counts[])
         int fft_length = 1<<sf;
         int chirp_points = fft_length;
         int rx_points = 0;
+        
         int preamble_length;
         int quotient;
         int remainder;
         int chirp_count;
-
         for (j = 0; j < size; j++) {
             int rx_sf = sf_range[j];
             int rx_chirp_points = (1<<rx_sf)* 2;
             rx_points += rx_chirp_points;
         }
-
+        
+        /* C90: declare variables at top of block */
         preamble_length = rx_points;
         quotient = preamble_length / chirp_points;
         remainder = preamble_length % chirp_points;
@@ -1853,8 +1905,7 @@ int calculate_chirp_count(int sf_range[], int size, int chirp_counts[])
 RF_Err_t rf_set_auto_sf_tx_preamble(int sf, int sf_range[], int size, int chirp_counts[])
 {
     int i;
-
-    for (i = 0; i < size; i++) {
+	for(i = 0; i < size; i++) {
 		if( sf == sf_range[i])
 		{
 			RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, 0x13, (chirp_counts[i]& 0xff)));
@@ -1875,10 +1926,10 @@ RF_Err_t rf_set_auto_sf_rx_on(int sf_range[], int size)
 {
     int i;
     uint8_t sf_mask = 0;
-
     RF_ASSERT(rf_set_spec_page_reg_bits(PAGE3_SEL, 0x12, BIT0));
     RF_ASSERT(rf_write_spec_page_reg(PAGE1_SEL, 0x25, 0x04));
-    for (i = 0; i < size; i++) {
+	
+	for(i = 0; i < size; i++) {
 
 		sf_mask |= (1 << (sf_range[i] - 5));
 		
@@ -2322,10 +2373,7 @@ RF_Err_t rf_set_dcdc_calibr_on(uint8_t calibr_type)
     }
 
     loop_time = 5;
-    dcdc_cal  = 0;
-    rd_data   = 0;
-    wr_data   = 0;
-    offset_reg_addr = 0x1D; /* default */
+    dcdc_cal = 0;
 
     if (calibr_type == CALIBR_ZERO_CMP)
     {
@@ -2335,7 +2383,7 @@ RF_Err_t rf_set_dcdc_calibr_on(uint8_t calibr_type)
     {
         offset_reg_addr = 0x1D;
     }
-    else /* CALIBR_IMAX_CMP */
+    else if (calibr_type == CALIBR_IMAX_CMP)
     {
         offset_reg_addr = 0x1C;
     }
@@ -2345,12 +2393,23 @@ RF_Err_t rf_set_dcdc_calibr_on(uint8_t calibr_type)
 
     for (; loop_time > 0; loop_time--)
     {
-        dcdc_cal |= (uint8_t)(0x01u << (loop_time - 1));
+        dcdc_cal |= (0x01 << (loop_time - 1));
+        wr_data = 0x80 | dcdc_cal;
+        RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, offset_reg_addr, wr_data));
+
+        rd_data = rf_read_spec_page_reg(PAGE3_SEL, 0x27);
+        if (rd_data & 0x01)
+        {
+            dcdc_cal &= ~(0x01 << (loop_time - 1));
+        }
+        else
+        {
+            dcdc_cal |= (0x01 << (loop_time - 1));
+        }
+        wr_data = 0x80 | dcdc_cal;
+        RF_ASSERT(rf_write_spec_page_reg(PAGE3_SEL, offset_reg_addr, wr_data));
     }
 
-    /* 下面保持你原本逻辑（从你原文件继续往下） */
-    /* rd_data = rf_read_spec_page_reg(PAGE3_SEL, offset_reg_addr); ... */
-    /* …… */
     return OK;
 }
 
@@ -2622,176 +2681,3 @@ RF_Err_t rf_set_default_para(void)
 	  printf("FREQ= %d  SF=%d   BW=%d  CR=%d \r\n",DEFAULT_FREQ,DEFAULT_SF,DEFAULT_BW,DEFAULT_CR);
     return OK;
 }
-
-static uint8_t rf_read_reg_repeat(uint8_t addr, uint8_t times, uint8_t *minv, uint8_t *maxv)
-{
-    uint8_t v;
-    uint8_t mn;
-    uint8_t mx;
-    uint8_t i;
-
-    mn = 0xFFu;
-    mx = 0x00u;
-
-    for (i = 0; i < times; i++)
-    {
-        v = rf_read_reg(addr);
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-    }
-
-    if (minv) *minv = mn;
-    if (maxv) *maxv = mx;
-    return v;
-}
-
-static void dbg_puts_hex8(const char *prefix, uint8_t v)
-{
-    dbg_puts(prefix);
-    dbg_puts("0x");
-    dbg_put_hex8(v);
-    dbg_puts("\r\n");
-}
-
-uint8_t rf_spi_self_test(void)
-{
-    /* declarations MUST be at top in C90 */
-    uint8_t r00, r02, r04;
-    uint8_t page0_r00, page3_r00;
-    uint8_t old_page;
-    uint8_t w, rb;
-    uint8_t ok;
-
-    ok = 1u;
-
-    dbg_puts("\r\n[RF][SPI] ===== SPI SELF TEST BEGIN =====\r\n");
-
-    /* -------- Basic sanity read (page0) -------- */
-    r00 = rf_read_reg(REG_SYS_CTL);
-    r02 = rf_read_reg(REG_OP_MODE);
-    r04 = rf_read_reg(0x04u);
-
-    dbg_puts("[RF][SPI] REG00(SYS_CTL)=0x"); dbg_put_hex8(r00);
-    dbg_puts(" REG02(OP_MODE)=0x"); dbg_put_hex8(r02);
-    dbg_puts(" REG04=0x"); dbg_put_hex8(r04);
-    dbg_puts("\r\n");
-
-    /* If everything is 0x00 or 0xFF, SPI likely not working (MISO floating / CS issue) */
-    if (((r00 | r02 | r04) == 0x00u) || ((r00 & r02 & r04) == 0xFFu)) {
-        dbg_puts("[RF][SPI] WARN: basic regs look like all 00/FF, check wiring/CS/MISO\r\n");
-        /* do not early-fail here because REG00/02 can be 0x00 in some modes; continue with RW test */
-    }
-
-    /* -------- Reliable read/write test (REG0x04 bit4) --------
-     * In your PRETEST this RW path works, so keep the self-test aligned.
-     */
-    w  = (uint8_t)(r04 ^ 0x10u);   /* toggle bit4 */
-    rf_write_reg(0x04u, w);
-    rb = rf_read_reg(0x04u);
-
-    dbg_puts("[RF][SPI] toggle REG04 bit4: write 0x"); dbg_put_hex8(w);
-    dbg_puts(" -> read 0x"); dbg_put_hex8(rb);
-    dbg_puts("\r\n");
-
-    /* restore */
-    rf_write_reg(0x04u, r04);
-
-    if (rb != w) {
-        dbg_puts("[RF][SPI] FAIL: REG04 write/readback mismatch!\r\n");
-        ok = 0u;
-    }
-
-    /* -------- Page switch verification --------
-     * NOTE: Different pages have different register maps; page0 and page3 dumps are EXPECTED to differ.
-     * We only verify that page bits can be set/read back.
-     */
-    old_page = (uint8_t)(r00 & 0x0Fu);
-
-    /* switch to page0 */
-    rf_write_reg(REG_SYS_CTL, (uint8_t)((r00 & 0xF0u) | 0x00u));
-    page0_r00 = rf_read_reg(REG_SYS_CTL);
-
-    /* switch to page3 */
-    rf_write_reg(REG_SYS_CTL, (uint8_t)((r00 & 0xF0u) | 0x03u));
-    page3_r00 = rf_read_reg(REG_SYS_CTL);
-
-    dbg_puts("[RF][SPI] page switch check: page0 REG00=0x"); dbg_put_hex8(page0_r00);
-    dbg_puts(" page3 REG00=0x"); dbg_put_hex8(page3_r00);
-    dbg_puts("\r\n");
-
-    if ( (page0_r00 & 0x0Fu) != 0x00u || (page3_r00 & 0x0Fu) != 0x03u ) {
-        dbg_puts("[RF][SPI] FAIL: page bits not taking effect (REG00 low nibble)\r\n");
-        ok = 0u;
-    }
-
-    /* restore original page */
-    rf_write_reg(REG_SYS_CTL, (uint8_t)((r00 & 0xF0u) | old_page));
-
-    if (ok) {
-        dbg_puts("[RF][SPI] ===== SPI SELF TEST PASS =====\r\n");
-    } else {
-        dbg_puts("[RF][SPI] ===== SPI SELF TEST FAIL =====\r\n");
-    }
-
-    return ok;
-}
-
-
-
-
-/* =====================================================================
- *  SPI 预检：必须在 rf_init() 之前调用
- *  - 目的：排除“rf_init 改变状态/页/模式”对 SPI 自检的影响
- *  - 流程：GPIO/SPI 初始化一次 -> 硬复位 -> 读 REG00/02/04
- *          -> 翻转 REG04 bit4 写回读 -> 恢复原值
- *  说明：仅验证 SPI 读写链路是否可靠，不做 RF 配置。
- * ===================================================================== */
-bool rf_spi_pretest_before_init(void)
-{
-    uint8_t r00, r02, r04, r04_new, r04_rb;
-
-    dbg_puts("[RF][PRE] enter\r\n");
-
-    /* 确保 SPI/GPIO 已初始化，并做一次硬复位，使芯片回到默认 page0 状态 */
-    pan3029_port_init_once();
-    pan3029_port_hw_reset();
-
-    r00 = rf_read_reg(0x00);
-    r02 = rf_read_reg(0x02);
-    r04 = rf_read_reg(0x04);
-
-    dbg_puts("[RF][PRE] REG00=0x"); dbg_put_hex8(r00);
-    dbg_puts(" REG02=0x"); dbg_put_hex8(r02);
-    dbg_puts(" REG04=0x"); dbg_put_hex8(r04);
-    dbg_puts("\r\n");
-
-    /* 快速排除全 0 / 全 FF 这种“线不通/悬空”情况 */
-    if (((r00 == 0x00) && (r02 == 0x00) && (r04 == 0x00)) ||
-        ((r00 == 0xFF) && (r02 == 0xFF) && (r04 == 0xFF)))
-    {
-        dbg_puts("[RF][PRE] FAIL: regs look like all 00/FF\r\n");
-        return false;
-    }
-
-    /* 翻转 REG04 bit4（你 rf_init 日志里也在操作这个位）做写回读验证 */
-    r04_new = (uint8_t)(r04 ^ (1u << 4));
-    rf_write_reg(0x04, r04_new);
-    r04_rb = rf_read_reg(0x04);
-
-    dbg_puts("[RF][PRE] toggle REG04 bit4: write 0x"); dbg_put_hex8(r04_new);
-    dbg_puts(" -> read 0x"); dbg_put_hex8(r04_rb);
-    dbg_puts("\r\n");
-
-    /* 恢复 */
-    rf_write_reg(0x04, r04);
-
-    if (r04_rb != r04_new)
-    {
-        dbg_puts("[RF][PRE] FAIL: write/readback mismatch\r\n");
-        return false;
-    }
-
-    dbg_puts("[RF][PRE] PASS\r\n");
-    return true;
-}
-

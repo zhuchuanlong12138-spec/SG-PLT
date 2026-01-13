@@ -205,3 +205,22 @@ void dbg_hexdump(const uint8_t *data, uint16_t len)
         }
     }
 }
+void dbg_hex8(const char *tag, uint8_t v)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[64];
+    int n = 0;
+
+    while (tag && *tag && n < (int)(sizeof(buf) - 1)) buf[n++] = *tag++;
+
+    buf[n++] = ':';
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    buf[n++] = hex[(v >> 4) & 0x0F];
+    buf[n++] = hex[(v >> 0) & 0x0F];
+    buf[n++] = '\r';
+    buf[n++] = '\n';
+    buf[n]   = '\0';
+
+    dbg_puts(buf);
+}

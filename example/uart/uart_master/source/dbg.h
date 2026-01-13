@@ -30,7 +30,7 @@ void dbg_put_hex16(uint16_t v);
 void dbg_put_u32(uint32_t v);
 
 void dbg_hexdump(const uint8_t *buf, uint16_t len);
-
+void dbg_hex8(const char *tag, uint8_t v);
 #ifdef __cplusplus
 }
 #endif

@@ -421,11 +421,6 @@
               <FilePath>..\source\delay.c</FilePath>
             </File>
             <File>
-              <FileName>dl2807_mac.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\source\dl2807\dl2807_mac.c</FilePath>
-            </File>
-            <File>
               <FileName>dbg.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\source\dbg.c</FilePath>
