@@ -36,24 +36,24 @@ static void pan3029_spi_init_official(void)
 
     DDL_ZERO_STRUCT(cfg);
 
-    /* SPI PinMux£ºÓëÒÑÑéÖ¤¿ÉÓÃµÄ SPI ²âÊÔ¹¤³Ì±£³ÖÒ»ÖÂ */
+    /* SPI PinMuxÖ¤Ãµ SPI Ô¹Ì±Ò» */
     Gpio_SetFunc_SPI_CS_P03();
     Gpio_SetFunc_SPIMISO_P23();
     Gpio_SetFunc_SPIMOSI_P24();
     Gpio_SetFunc_SPICLK_P25();
 
-    /* SPI ÍâÉèÃÅ¿Ø */
+    /* SPI Å¿ */
     Clk_SetPeripheralGate(ClkPeripheralSpi, TRUE);
 
-    /* ÏÈÀ­¸ß CSN£¨SSN=1 ±íÊ¾²»Ñ¡ÖÐ£¬´Ó»úÊÍ·Å MISO£© */
+    /*  CSNSSN=1 Ê¾Ñ¡Ð£Ó»Í· MISO */
     Spi_SetCS(TRUE);
 
-    /* SPI Mode0£ºCPOL=0, CPHA=0£»Master£»¹Ø±ÕÖÐ¶Ï */
+    /* SPI Mode0CPOL=0, CPHA=0MasterØ±Ð¶ */
     cfg.bCPHA       = Spicphafirst;
     cfg.bCPOL       = Spicpollow;
     cfg.bIrqEn      = FALSE;
     cfg.bMasterMode = SpiMaster;
-    cfg.u8BaudRate  = SpiClkDiv32; /* ½¨ÒéÏÈÂýÒ»µã£¬ÎÈ¶¨ºóÔÙÌáËÙ */
+    cfg.u8BaudRate  = SpiClkDiv32; /* Ò»ã£¬È¶ */
     cfg.pfnIrqCb    = NULL;
 
     (void)Spi_Init(&cfg);
@@ -80,7 +80,7 @@ static void pan3029_gpio_init_once(void)
     PAN3029_RST_HIGH();
 #endif
 
-    /* IRQ  + §Ø? */
+    /* IRQ  + ? */
     (void)Gpio_InitIO(PAN3029_IRQ_PORT, PAN3029_IRQ_PIN, GpioDirIn);
     (void)Gpio_EnableIrq(PAN3029_IRQ_PORT, PAN3029_IRQ_PIN, PAN3029_IRQ_TRIG);
 
@@ -93,7 +93,7 @@ static void pan3029_gpio_init_once(void)
     EnableNvic(PORT2_IRQn, 3u, TRUE);
 #endif
 
-    /* SPI ??/µÏ? */
+    /* SPI ??/? */
     pan3029_spi_init_official();
 
     s_hw_inited = 1u;
@@ -118,7 +118,7 @@ static void pan3029_hw_reset(void)
 #endif
 }
 
-/* ===================== rf_port ?‰Í pan3029_rf.c ?? ===================== */
+/* ===================== rf_port ? pan3029_rf.c ?? ===================== */
 rf_port_t rf_port =
 {
     rf_antenna_init,
@@ -164,7 +164,7 @@ uint8_t spi_readwritebyte(uint8_t tx_data)
     return rx;
 }
 
-/* CSN §¹Spi_SetCS(FALSE)=?TRUE= */
+/* CSN Spi_SetCS(FALSE)=?TRUE= */
 void spi_cs_set_high(void)
 {
     Spi_SetCS(TRUE);
@@ -188,30 +188,26 @@ void rf_delay_us(uint32_t time)
 /* ===================== antenna/tcxo + ? ===================== */
 void rf_antenna_init(void)
 {
-    uint8_t r0;
-    uint8_t r2;
-    uint8_t r4;
-
-    pan3029_gpio_init_once();
-    pan3029_hw_reset();
-
+    /* NOTE:
+     * In STM32 reference port, antenna_init() ONLY configures RF front-end pins (TX/RX/PA/LNA/TCXO),
+     * and MUST NOT touch SPI/GPIO init or HW reset.
+     *
+     * The XH32 version previously did:
+     *   - GPIO/SPI one-time init
+     *   - PAN3029 HW reset
+     *   - Probe registers
+     *
+     * That breaks rf_init() because pan3029_rf_XH32.c calls rf_port.antenna_init() multiple times
+     * (step 0 and step 18, and also in rf_sleep_wakeup()).
+     * If antenna_init() performs HW reset, it will wipe all RF registers configured in rf_init().
+     *
+     * Therefore, we keep antenna_init() as a lightweight hook. All SPI/GPIO init and HW reset
+     * are moved to main() via:
+     *   - pan3029_port_init_once()
+     *   - pan3029_port_hw_reset()
+     */
     log_prefix("RF");
-    LOGS("probe regs... (expect not all 00/FF)");
-
-    r0 = rf_read_reg(0x00u);
-    r2 = rf_read_reg(0x02u);
-    r4 = rf_read_reg(0x04u);
-
-    log_prefix("RF");
-    LOGS("REG00=0x"); LOG_HEX8(r0);
-    LOGS(" REG02=0x"); LOG_HEX8(r2);
-    LOGS(" REG04=0x"); LOG_HEX8(r4);
-
-    log_prefix("RF");
-    LOGS("IRQ="); LOG_HEX8((uint8_t)(PAN3029_IRQ_READ() ? 1u : 0u));
-#if (PAN3029_CAD_PRESENT == 1u)
-    LOGS(" CAD="); LOG_HEX8((uint8_t)(PAN3029_CAD_READ() ? 1u : 0u));
-#endif
+    LOGS("antenna_init (no hw init/reset here)");
 }
 
 void rf_tcxo_init(void)     { }
@@ -220,7 +216,7 @@ void rf_antenna_rx(void)    { }
 void rf_antenna_tx(void)    { }
 void rf_antenna_close(void) { }
 
-/* ===================== GPIO §Ø?IRQ -> rf_irq_process() ===================== */
+/* ===================== GPIO ?IRQ -> rf_irq_process() ===================== */
 void Gpio_IRQHandler(uint8_t u8Port)
 {
     if (u8Port == PAN3029_IRQ_PORT)

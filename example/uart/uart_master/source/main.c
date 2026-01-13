@@ -23,6 +23,7 @@
 #include "dbg.h"
 
 #include "pan3029_rf.h"
+#include "pan3029_port.h"
 
 /* Switch system clock to 32MHz external high-speed crystal (XTH).
  * Must be called BEFORE UART init (baud depends on PCLK).
@@ -140,7 +141,30 @@ int32_t main(void)
     dbg_puts("==============================\r\n");
 
     Delay_Init((uint32_t)Clk_GetHClkFreq());
+		
+		
+		dbg_puts("[DBG] g_ms=");
+		dbg_put_u32(g_ms);
+		dbg_puts(" before rf_init\r\n");
+
+		Delay_Ms(200);
+
+		dbg_puts("[DBG] g_ms=");
+		dbg_put_u32(g_ms);
+		dbg_puts(" after 200ms\r\n");
+
+
+
     dbg_puts("[BOOT] Delay_Init(SysTick 1ms) OK\r\n");
+
+    /* PAN3029 HW bring-up must happen BEFORE rf_init().
+     * - SPI PinMux + SPI peripheral init
+     * - CSN default high
+     * - IRQ pin input + interrupt enable
+     * - RST pin reset pulse
+     */
+    pan3029_port_init_once();
+    pan3029_port_hw_reset();
 
     main_print_help();
 
